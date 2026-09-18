@@ -82,16 +82,44 @@ Workflow commits posted.json if changed (github-actions[bot])
 ## Data Flow / Error Handling
 
 - Source repo is public — no auth needed to fetch `listings.json`.
-- Discord webhook rate limit is 30 messages/minute; expected volume
-  (a handful of new listings/day) never approaches this, so no
-  throttling logic is needed.
-- If the Discord POST for one listing fails mid-batch, the script exits
-  non-zero without updating `posted.json` for *any* listing in that
-  run — the whole day's batch is retried next run. This risks
-  duplicate posts for listings that succeeded before the failure, but
-  never risks silently dropping a listing. Given expected low daily
-  volume, occasional duplicates are an acceptable trade-off against the
-  complexity of partial-batch tracking.
+- **Real daily volume is much higher than originally assumed.** Live
+  data (checked 2026-09-18) shows 4,321 currently-active listings and
+  60-300+ newly-active listings per day during internship season (e.g.
+  225, 208, 316 on recent days) — one to two orders of magnitude above
+  Discord's webhook rate limit of ~30 messages/minute. Posting one
+  message per listing with no batching or throttling will hit the
+  limit, fail, and (under the original all-or-nothing state rule)
+  retry the same doomed batch forever. The design below replaces that
+  assumption.
+- **Batching:** listings are posted in batches of up to 10 embeds per
+  Discord message (Discord's per-message embed limit), not one message
+  per listing. This drops a 200-listing day from 200 requests to ~20,
+  comfortably under the rate limit.
+- **Incremental state persistence:** `posted.json` is updated after
+  each successful batch, not only after the entire run succeeds. If
+  batch N fails, batches 1..N-1 are already durably recorded as
+  posted, and the run exits non-zero — the next run resumes from batch
+  N instead of reposting everything already sent. This still guarantees
+  a listing is never silently dropped (it's retried until it succeeds)
+  while eliminating the duplicate-storm failure mode of the original
+  all-or-nothing rule.
+- **Per-listing validation:** a listing missing a required field, or
+  with an oversized title/description, is skipped and logged rather
+  than aborting the whole run — one bad listing from the
+  community-maintained source must not wedge every other listing
+  behind it indefinitely. Skipped listings are still recorded in
+  `posted.json` (as "handled") so they aren't retried forever.
+- **Sanity cap:** if the number of new listings in a single run exceeds
+  a large threshold (100), the run exits non-zero without posting
+  anything. This is a guard against a corrupted or hand-edited
+  `posted.json` causing a mass-repost of the entire active listing set.
+- **Concurrency guard:** the workflow uses a concurrency group so an
+  overlapping manual (`workflow_dispatch`) run can never race the
+  scheduled run against the same `posted.json`.
+- **Error message hygiene:** error logging never includes the raw
+  exception string from a failed webhook request, since that string
+  can contain the webhook URL (including its secret token). Only the
+  HTTP status code and the listing ID are logged.
 
 ## Setup (manual, one-time)
 
