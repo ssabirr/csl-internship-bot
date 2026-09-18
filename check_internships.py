@@ -21,6 +21,13 @@ MAX_NEW_LISTINGS = 100
 REQUIRED_FIELDS = ("id", "title", "url", "date_posted", "company_name")
 MARKDOWN_SPECIAL_CHARS = "*_~`|>[]()"
 
+# Sane epoch bounds for date_posted (year 2000 - year 2100). Rejects values
+# datetime.fromtimestamp can't handle (e.g. upstream emitting milliseconds
+# instead of seconds), which would otherwise raise unguarded in format_embed
+# and permanently wedge that listing.
+MIN_VALID_EPOCH = 946684800  # 2000-01-01T00:00:00Z
+MAX_VALID_EPOCH = 4102444800  # 2100-01-01T00:00:00Z
+
 
 def escape_markdown(text):
     """Escape Discord/Markdown-significant characters in free text."""
@@ -52,10 +59,11 @@ def validate_listing(listing):
             return f"missing required field '{field}'"
         if isinstance(value, str) and not value.strip():
             return f"empty required field '{field}'"
-    if not isinstance(listing.get("date_posted"), (int, float)) or isinstance(
-        listing.get("date_posted"), bool
-    ):
+    date_posted = listing.get("date_posted")
+    if not isinstance(date_posted, (int, float)) or isinstance(date_posted, bool):
         return "field 'date_posted' is not a numeric timestamp"
+    if not (MIN_VALID_EPOCH <= date_posted <= MAX_VALID_EPOCH):
+        return "field 'date_posted' is outside the sane epoch range (2000-2100)"
     if not isinstance(listing.get("title"), str):
         return "field 'title' is not a string"
     if not isinstance(listing.get("url"), str):

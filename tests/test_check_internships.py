@@ -11,7 +11,7 @@ from check_internships import (
 )
 
 
-def _listing(id_, active=True, date_posted=100):
+def _listing(id_, active=True, date_posted=1700000000):
     return {
         "id": id_,
         "active": active,
@@ -149,6 +149,26 @@ def test_validate_rejects_non_numeric_date_posted():
     listing = _listing("a")
     listing["date_posted"] = "yesterday"
     assert "date_posted" in validate_listing(listing)
+
+
+def test_validate_rejects_out_of_range_date_posted():
+    listing = _listing("a")
+    listing["date_posted"] = 1700000000000  # milliseconds, not seconds
+    assert "date_posted" in validate_listing(listing)
+
+
+def test_validate_rejects_negative_date_posted():
+    listing = _listing("a")
+    listing["date_posted"] = -1
+    assert "date_posted" in validate_listing(listing)
+
+
+def test_validate_accepts_date_posted_at_range_boundaries():
+    listing = _listing("a")
+    listing["date_posted"] = 946684800  # 2000-01-01
+    assert validate_listing(listing) is None
+    listing["date_posted"] = 4102444800  # 2100-01-01
+    assert validate_listing(listing) is None
 
 
 def test_validate_rejects_non_dict():
