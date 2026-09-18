@@ -8,9 +8,16 @@ on:
 permissions:
   contents: write
 
+# Overlapping runs (e.g. a manual dispatch during the scheduled run) must queue,
+# never race each other against the same posted.json.
+concurrency:
+  group: check-internships
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -25,7 +32,11 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python check_internships.py
 
+      # Runs even when the script exits non-zero: batches that did post are
+      # already recorded in posted.json, and that state must be committed or
+      # the next run would repost them.
       - name: Commit updated posted.json
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
