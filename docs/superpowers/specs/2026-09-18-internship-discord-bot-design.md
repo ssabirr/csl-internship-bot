@@ -31,12 +31,14 @@ check_internships.py
         │
         ├─ GET raw listings.json from SimplifyJobs/Summer2027-Internships
         ├─ read posted.json (already-posted listing IDs) from this repo
-        ├─ diff → new listings (oldest first)
-        ├─ POST one Discord embed per new listing → webhook URL (secret)
-        └─ write updated posted.json
+        ├─ diff → new listings (oldest first), capped at 100/run
+        ├─ validate + chunk into batches of ≤10 embeds
+        ├─ POST each batch → webhook URL (secret)
+        └─ after each successful batch, write updated posted.json
         │
         ▼
-Workflow commits posted.json if changed (github-actions[bot])
+Workflow commits posted.json if changed (github-actions[bot]),
+even if the script exited non-zero, so incremental progress persists
 ```
 
 ## Components
@@ -52,17 +54,25 @@ Workflow commits posted.json if changed (github-actions[bot])
   posting any of them to Discord, then exit. This avoids dumping
   thousands of backlog listings into the channel at once. From the
   next run onward, only genuinely new active listings get posted.
-- Computes new listings: active listings in the source whose `id` is
-  not in `posted.json`. Sorted oldest-first (`date_posted`) so the
-  channel reads chronologically.
-- For each new listing, POSTs a Discord embed to
-  `$DISCORD_WEBHOOK_URL` containing: company name, role title, location,
-  posted date, and the application link.
-- On success for all listings, writes the full updated ID list back to
-  `posted.json`.
-- Exits non-zero on fetch failure or malformed JSON, without touching
-  `posted.json` — so a failed run doesn't lose or corrupt state, and
-  simply retries in full on the next scheduled run.
+- Computes new listings: active, visible (`is_visible is not False`)
+  listings in the source whose `id` is not in `posted.json`. Sorted
+  oldest-first (`date_posted`) so the channel reads chronologically. If
+  more than 100 are found, exits non-zero without posting (sanity cap —
+  see Data Flow below).
+- Validates each new listing and skips (logs + marks handled) any
+  missing a required field; truncates an oversized title/description
+  rather than rejecting it.
+- Batches valid listings into groups of up to 10 and POSTs each batch
+  as one Discord message (`$DISCORD_WEBHOOK_URL`) containing embeds
+  with: company name, role title, location, posted date, and the
+  application link.
+- After each batch posts successfully, immediately writes the updated
+  ID list (including that batch's IDs) back to `posted.json` —
+  incremental persistence, not a single write at the end.
+- Exits non-zero on fetch failure, malformed JSON, the sanity cap, or a
+  batch POST failure — in the batch-failure case, prior successful
+  batches' IDs are already saved, so the next run resumes rather than
+  reposting everything.
 
 ### `posted.json`
 - Single JSON array of listing IDs (strings). Committed to the repo,
@@ -72,9 +82,15 @@ Workflow commits posted.json if changed (github-actions[bot])
 - Scheduled trigger (daily cron, e.g. `0 13 * * *` — 9am ET).
 - Also supports `workflow_dispatch` for manual runs (e.g. testing, or
   re-running after a failure).
+- A `concurrency` group (with `cancel-in-progress: false`) so an
+  overlapping manual run queues behind the scheduled run instead of
+  racing it against the same `posted.json`.
+- A `timeout-minutes` cap on the job.
 - Steps: checkout, set up Python, install `requests`, run the script
-  with `DISCORD_WEBHOOK_URL` from repo secrets, commit `posted.json` if
-  it changed.
+  with `DISCORD_WEBHOOK_URL` from repo secrets, then commit `posted.json`
+  if it changed — this commit step runs even if the script exited
+  non-zero, so incrementally-saved progress from a partial batch
+  failure survives instead of being lost with the runner.
 
 ### `requirements.txt`
 - `requests` only.
