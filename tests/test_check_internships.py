@@ -1,4 +1,4 @@
-from check_internships import find_new_listings
+from check_internships import find_new_listings, bootstrap_posted_ids
 
 
 def _listing(id_, active=True, date_posted=100):
@@ -51,3 +51,16 @@ def test_mix_of_posted_inactive_and_new():
     ]
     result = find_new_listings(listings, ["already-posted"])
     assert [l["id"] for l in result] == ["new-one"]
+
+
+def test_bootstrap_returns_only_active_ids():
+    listings = [
+        _listing("a", active=True),
+        _listing("b", active=False),
+        _listing("c", active=True),
+    ]
+    assert set(bootstrap_posted_ids(listings)) == {"a", "c"}
+
+
+def test_bootstrap_empty_source_returns_empty():
+    assert bootstrap_posted_ids([]) == []
