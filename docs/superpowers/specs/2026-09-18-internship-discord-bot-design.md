@@ -43,11 +43,18 @@ Workflow commits posted.json if changed (github-actions[bot])
 
 ### `check_internships.py`
 - Fetches `https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/.github/scripts/listings.json`.
-- Loads `posted.json` (a JSON array of listing IDs already posted; `[]`
-  if the file doesn't exist yet — first run).
-- Computes new listings: those in the source whose `id` is not in
-  `posted.json`. Sorted oldest-first so the channel reads
-  chronologically.
+  The source file contains every listing ever recorded (17,000+
+  entries as of this writing), most with `active: false` (expired).
+  Only entries with `active: true` are considered.
+- Loads `posted.json` (a JSON array of listing IDs already posted).
+- **Bootstrap case:** if `posted.json` doesn't exist yet (first run),
+  write it with the IDs of every currently-active listing *without*
+  posting any of them to Discord, then exit. This avoids dumping
+  thousands of backlog listings into the channel at once. From the
+  next run onward, only genuinely new active listings get posted.
+- Computes new listings: active listings in the source whose `id` is
+  not in `posted.json`. Sorted oldest-first (`date_posted`) so the
+  channel reads chronologically.
 - For each new listing, POSTs a Discord embed to
   `$DISCORD_WEBHOOK_URL` containing: company name, role title, location,
   posted date, and the application link.
