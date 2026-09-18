@@ -1,4 +1,4 @@
-from check_internships import find_new_listings, bootstrap_posted_ids
+from check_internships import find_new_listings, bootstrap_posted_ids, format_embed
 
 
 def _listing(id_, active=True, date_posted=100):
@@ -64,3 +64,20 @@ def test_bootstrap_returns_only_active_ids():
 
 def test_bootstrap_empty_source_returns_empty():
     assert bootstrap_posted_ids([]) == []
+
+
+def test_format_embed_contains_key_fields():
+    listing = _listing("a", date_posted=1700000000)
+    listing["company_name"] = "Acme Corp"
+    listing["title"] = "Software Intern"
+    listing["locations"] = ["Atlanta, GA", "Remote"]
+    listing["url"] = "https://example.com/apply"
+
+    embed = format_embed(listing)
+
+    assert embed["title"] == "Software Intern"
+    assert embed["url"] == "https://example.com/apply"
+    assert "Acme Corp" in embed["description"]
+    assert "Atlanta, GA, Remote" in embed["description"]
+    assert embed["fields"] == []
+    assert isinstance(embed["timestamp"], str)
