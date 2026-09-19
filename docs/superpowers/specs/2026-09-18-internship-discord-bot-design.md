@@ -14,11 +14,16 @@ structured export (checked and rejected for speedyapply and zapplyjobs
 
 ## Constraints & Decisions
 
-- No native Discord webhook exists on the source repo — we own the
+- No native Discord integration exists on the source repos — we own the
   polling and delivery.
-- Delivery uses a Discord **incoming webhook** (not a full bot with a
-  gateway connection), since we only ever push messages and never need
-  to read/respond in the channel.
+- Delivery uses a real Discord **bot account authenticated via REST API
+  with a bot token** (originally an incoming webhook; switched so the
+  poster — PantherWatch — appears as a visible member of the server,
+  matching how other utility bots like Dyno appear). This still needs
+  no persistent Gateway connection: the bot only ever sends messages
+  via one-off REST calls, never reads or responds to anything, so a
+  short-lived scheduled script can authenticate as it without staying
+  connected.
 - Runs on **GitHub Actions** (scheduled workflow) — free, no server to
   maintain.
 - State (which listings have already been posted) is tracked by
@@ -39,7 +44,7 @@ check_internships.py
         ├─ read posted.json (already-posted IDs + cross-source dedup keys)
         ├─ diff → new listings (oldest first), capped at 100/run
         ├─ validate + chunk into batches of ≤10 embeds
-        ├─ POST each batch → webhook URL (secret)
+        ├─ POST each batch → Discord REST API (bot token, secret)
         └─ after each successful batch, write updated posted.json
         │
         ▼
@@ -95,9 +100,11 @@ even if the script exited non-zero, so incremental progress persists
   missing a required field; truncates an oversized title/description
   rather than rejecting it.
 - Batches valid listings into groups of up to 10 and POSTs each batch
-  as one Discord message (`$DISCORD_WEBHOOK_URL`) containing embeds
-  with: company name, role title, location, posted date, and the
-  application link.
+  as one Discord message, via `POST /channels/{channel_id}/messages`
+  authenticated with `Authorization: Bot $DISCORD_BOT_TOKEN`, containing
+  embeds with: company name, role title, location, posted date, and the
+  application link. The channel ID is a constant in the script (not a
+  secret — useless without the bot token).
 - After each batch posts successfully, immediately writes the updated
   ID list (including that batch's IDs) back to `posted.json` —
   incremental persistence, not a single write at the end.
@@ -107,8 +114,9 @@ even if the script exited non-zero, so incremental progress persists
   reposting everything.
 
 ### `posted.json`
-- Single JSON array of listing IDs (strings). Committed to the repo,
-  giving a versioned audit trail of what's been posted and when.
+- `{"ids": [...], "keys": [...]}` — per-listing IDs and cross-source
+  dedup keys. Committed to the repo, giving a versioned audit trail of
+  what's been posted and when.
 
 ### `.github/workflows/check.yml`
 - Scheduled trigger (hourly cron, `0 * * * *`).
@@ -119,7 +127,7 @@ even if the script exited non-zero, so incremental progress persists
   racing it against the same `posted.json`.
 - A `timeout-minutes` cap on the job.
 - Steps: checkout, set up Python, install `requests`, run the script
-  with `DISCORD_WEBHOOK_URL` from repo secrets, then commit `posted.json`
+  with `DISCORD_BOT_TOKEN` from repo secrets, then commit `posted.json`
   if it changed — this commit step runs even if the script exited
   non-zero, so incrementally-saved progress from a partial batch
   failure survives instead of being lost with the runner.
@@ -134,7 +142,8 @@ even if the script exited non-zero, so incremental progress persists
   data (checked 2026-09-18) shows 4,321 currently-active listings and
   60-300+ newly-active listings per day during internship season (e.g.
   225, 208, 316 on recent days) — one to two orders of magnitude above
-  Discord's webhook rate limit of ~30 messages/minute. Posting one
+  Discord's per-channel message rate limit (roughly 30/minute,
+  regardless of whether posting via webhook or bot token). Posting one
   message per listing with no batching or throttling will hit the
   limit, fail, and (under the original all-or-nothing state rule)
   retry the same doomed batch forever. The design below replaces that
@@ -165,16 +174,28 @@ even if the script exited non-zero, so incremental progress persists
   overlapping manual (`workflow_dispatch`) run can never race the
   scheduled run against the same `posted.json`.
 - **Error message hygiene:** error logging never includes the raw
-  exception string from a failed webhook request, since that string
-  can contain the webhook URL (including its secret token). Only the
-  HTTP status code and the listing ID are logged.
+  exception string from a failed Discord API request, on the
+  conservative assumption that request/response details could echo
+  something sensitive. Only the HTTP status code and the listing ID
+  are logged.
 
 ## Setup (manual, one-time)
 
-1. Create a Discord incoming webhook in the target channel (Server
-   Settings → Integrations → Webhooks → New Webhook → copy URL).
-2. Add the URL as a GitHub Actions secret named `DISCORD_WEBHOOK_URL`
-   on this repo.
+1. Create a Discord Application + Bot in the
+   [Developer Portal](https://discord.com/developers/applications); set
+   its username/avatar there (this is the bot's real identity, not a
+   per-message override). Leave all Privileged Gateway Intents off —
+   the bot only sends messages, never reads.
+2. Add the bot token as a GitHub Actions secret named
+   `DISCORD_BOT_TOKEN` on this repo.
+3. Generate an OAuth2 invite URL (Developer Portal → OAuth2 → URL
+   Generator) with scope `bot` and permissions limited to **View
+   Channel**, **Send Messages**, **Embed Links** — no broader
+   permissions than the bot actually needs. Open it and authorize it
+   into the server.
+4. Set `DISCORD_CHANNEL_ID` in `check_internships.py` to the target
+   channel's ID (Discord → enable Developer Mode → right-click channel
+   → Copy Channel ID). Not a secret.
 
 ## Testing
 

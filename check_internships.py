@@ -212,20 +212,24 @@ def save_posted_ids(path, state):
         f.write("\n")
 
 
-WEBHOOK_USERNAME = "PantherWatch"
+# The channel PantherWatch posts to. Not a secret -- useless without the
+# bot token, which is what actually authorizes posting.
+DISCORD_CHANNEL_ID = "1291082188812582974"
 
 
-def post_to_discord(webhook_url, embeds):
-    payload = {"username": WEBHOOK_USERNAME, "embeds": embeds}
-    response = requests.post(webhook_url, json=payload, timeout=30)
+def post_to_discord(bot_token, embeds):
+    url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages"
+    headers = {"Authorization": f"Bot {bot_token}"}
+    response = requests.post(url, headers=headers, json={"embeds": embeds}, timeout=30)
     response.raise_for_status()
 
 
 def _status_code(exc):
     """Extract an HTTP status code from a requests exception, if any.
 
-    Never returns or logs the exception string: it embeds the webhook URL,
-    which contains the secret token.
+    Never returns or logs the exception string: exceptions from `requests`
+    can echo request details, and this keeps the bot token out of logs
+    unconditionally rather than relying on knowing exactly what leaks.
     """
     response = getattr(exc, "response", None)
     if response is None:
@@ -234,7 +238,7 @@ def _status_code(exc):
 
 
 def main():
-    webhook_url = os.environ["DISCORD_WEBHOOK_URL"]
+    bot_token = os.environ["DISCORD_BOT_TOKEN"]
 
     source_listings, failed_sources = fetch_all_sources(SOURCES)
     if len(failed_sources) == len(SOURCES):
@@ -302,7 +306,7 @@ def main():
         batch_ids = [listing["id"] for listing in batch]
         batch_keys = [dedup_key(listing) for listing in batch]
         try:
-            post_to_discord(webhook_url, [format_embed(listing) for listing in batch])
+            post_to_discord(bot_token, [format_embed(listing) for listing in batch])
         except requests.RequestException as exc:
             status = _status_code(exc)
             if status is not None and 400 <= status < 500 and status != 429:
