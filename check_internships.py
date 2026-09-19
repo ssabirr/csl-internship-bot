@@ -309,9 +309,14 @@ def main():
             post_to_discord(bot_token, [format_embed(listing) for listing in batch])
         except requests.RequestException as exc:
             status = _status_code(exc)
-            if status is not None and 400 <= status < 500 and status != 429:
-                # Client error: Discord will reject this payload again on every
-                # retry. Mark handled so it doesn't wedge the queue forever.
+            if status == 400:
+                # Bad Request: this specific payload is malformed and Discord
+                # will reject it again on every retry (unlike 401/403/404,
+                # which mean something is wrong with the bot's auth/permissions/
+                # channel config, not with this listing -- those should stay
+                # retryable so the listing posts once that's fixed, rather than
+                # being permanently marked handled over an unrelated outage).
+                # 429 is handled by the retryable branch below.
                 print(
                     f"Discord rejected a batch with HTTP {status}; dropping these "
                     f"listings without retry: {batch_ids}",

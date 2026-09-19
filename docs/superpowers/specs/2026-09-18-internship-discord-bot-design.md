@@ -166,6 +166,17 @@ even if the script exited non-zero, so incremental progress persists
   community-maintained source must not wedge every other listing
   behind it indefinitely. Skipped listings are still recorded in
   `posted.json` (as "handled") so they aren't retried forever.
+- **Discord batch-rejection handling:** if Discord rejects a posted
+  batch with HTTP 400 (Bad Request), that specific payload is
+  permanently malformed and would fail identically on every retry, so
+  the batch is dropped and marked handled without retrying. Any other
+  status — 401/403/404 (bad token, missing permissions, wrong channel
+  — an environment/config problem, not the listing's fault), 429
+  (rate limited), or 5xx — is treated as retryable: the run stops
+  without marking that batch handled, so it posts normally on the next
+  run once the underlying issue is fixed. (Found via a real 403 during
+  bot-token setup, when the batch would otherwise have been
+  permanently dropped over what was just a missing channel permission.)
 - **Sanity cap:** if the number of new listings in a single run exceeds
   a large threshold (100), the run exits non-zero without posting
   anything. This is a guard against a corrupted or hand-edited
