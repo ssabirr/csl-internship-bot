@@ -92,10 +92,14 @@ even if the script exited non-zero, so incremental progress persists
   cap.)
 - Computes new listings: active, visible (`is_visible is not False`)
   listings, combined across all sources, whose `id` is not in
-  `posted.json`'s `ids` and whose `dedup_key` is not in its `keys`.
-  Sorted oldest-first (`date_posted`) so the channel reads
-  chronologically. If more than 100 are found, exits non-zero without
-  posting (sanity cap — see Data Flow below).
+  `posted.json`'s `ids`, whose `dedup_key` is not in its `keys`, and
+  whose `date_posted` is within the last 5 days (`MAX_LISTING_AGE_DAYS`
+  — see Data Flow below). A missing/malformed `date_posted` is not
+  filtered here; `validate_listing` rejects those separately, keeping
+  "is it fresh" and "is it well-formed" as distinct checks. Sorted
+  oldest-first (`date_posted`) so the channel reads chronologically. If
+  more than 100 are found, exits non-zero without posting (sanity cap
+  — see Data Flow below).
 - Validates each new listing and skips (logs + marks handled) any
   missing a required field; truncates an oversized title/description
   rather than rejecting it.
@@ -166,6 +170,14 @@ even if the script exited non-zero, so incremental progress persists
   community-maintained source must not wedge every other listing
   behind it indefinitely. Skipped listings are still recorded in
   `posted.json` (as "handled") so they aren't retried forever.
+- **Freshness filter:** only listings whose `date_posted` is within the
+  last `MAX_LISTING_AGE_DAYS` (5) days are eligible to post. Without
+  this, a listing a source repo only just added to its feed — but that
+  was itself posted weeks or months ago (backfilled data, or a listing
+  this bot simply hadn't ingested until now) — would show up in the
+  channel looking like a brand-new opportunity. The cutoff is
+  club-observed practice, not tied to any upstream API's own notion of
+  "active."
 - **Discord batch-rejection handling:** if Discord rejects a posted
   batch with HTTP 400 (Bad Request), that specific payload is
   permanently malformed and would fail identically on every retry, so

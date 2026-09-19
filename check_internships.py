@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import json
 import os
 import sys
+import time
 import requests
 
 SOURCES = [
@@ -25,6 +26,12 @@ DESCRIPTION_MAX_LEN = 4096
 
 # Guard against a corrupted/hand-edited posted.json causing a mass repost.
 MAX_NEW_LISTINGS = 100
+
+# Only post listings whose date_posted is this recent -- otherwise a
+# listing sourced weeks/months ago (e.g. a source repo backfilling old
+# data, or a listing this bot simply hadn't seen yet) shows up as "new".
+MAX_LISTING_AGE_DAYS = 5
+MAX_LISTING_AGE_SECONDS = MAX_LISTING_AGE_DAYS * 86400
 
 REQUIRED_FIELDS = ("id", "title", "url", "date_posted", "company_name")
 MARKDOWN_SPECIAL_CHARS = "*_~`|>[]()"
@@ -113,7 +120,21 @@ def dedup_key(listing):
     return f"{company}|{title}|{url}"
 
 
-def find_new_listings(source_listings, posted_ids, posted_keys=()):
+def _is_recent(listing, now, max_age_seconds):
+    """True unless date_posted is a valid timestamp older than the cutoff.
+
+    A missing/malformed date_posted is left alone here -- validate_listing
+    is what rejects those, keeping this function's only job "is it fresh."
+    """
+    date_posted = listing.get("date_posted")
+    if not isinstance(date_posted, (int, float)) or isinstance(date_posted, bool):
+        return True
+    return (now - date_posted) <= max_age_seconds
+
+
+def find_new_listings(source_listings, posted_ids, posted_keys=(), now=None):
+    if now is None:
+        now = time.time()
     posted_ids = set(posted_ids)
     posted_keys = set(posted_keys)
     new = [
@@ -122,6 +143,7 @@ def find_new_listings(source_listings, posted_ids, posted_keys=()):
         if _is_postable(listing)
         and listing.get("id") not in posted_ids
         and dedup_key(listing) not in posted_keys
+        and _is_recent(listing, now, MAX_LISTING_AGE_SECONDS)
     ]
     new.sort(key=_sort_key)
     return new

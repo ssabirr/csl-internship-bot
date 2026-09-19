@@ -1,5 +1,8 @@
+import time
+
 from check_internships import (
     DESCRIPTION_MAX_LEN,
+    MAX_LISTING_AGE_SECONDS,
     TITLE_MAX_LEN,
     bootstrap_posted_ids,
     bootstrap_posted_keys,
@@ -15,7 +18,9 @@ from check_internships import (
 )
 
 
-def _listing(id_, active=True, date_posted=1700000000):
+def _listing(id_, active=True, date_posted=None):
+    if date_posted is None:
+        date_posted = int(time.time()) - 3600  # 1 hour ago -- always "recent"
     return {
         "id": id_,
         "active": active,
@@ -53,7 +58,9 @@ def test_sorted_oldest_first_by_date_posted():
         _listing("newer", date_posted=200),
         _listing("older", date_posted=100),
     ]
-    result = find_new_listings(listings, [])
+    # now=1000 keeps these tiny fixture timestamps "recent" -- this test is
+    # about sort order, not the freshness filter (covered separately below).
+    result = find_new_listings(listings, [], now=1000)
     assert [l["id"] for l in result] == ["older", "newer"]
 
 
@@ -63,8 +70,36 @@ def test_mix_of_posted_inactive_and_new():
         _listing("inactive", active=False, date_posted=60),
         _listing("new-one", date_posted=70),
     ]
-    result = find_new_listings(listings, ["already-posted"])
+    result = find_new_listings(listings, ["already-posted"], now=1000)
     assert [l["id"] for l in result] == ["new-one"]
+
+
+# --- freshness filter -------------------------------------------------------
+
+
+def test_excludes_listing_older_than_max_age():
+    listing = _listing("a", date_posted=1000)
+    now = 1000 + MAX_LISTING_AGE_SECONDS + 1
+    assert find_new_listings([listing], [], now=now) == []
+
+
+def test_includes_listing_at_exactly_max_age():
+    listing = _listing("a", date_posted=1000)
+    now = 1000 + MAX_LISTING_AGE_SECONDS
+    assert [l["id"] for l in find_new_listings([listing], [], now=now)] == ["a"]
+
+
+def test_includes_listing_within_max_age():
+    listing = _listing("a", date_posted=1000)
+    now = 1000 + MAX_LISTING_AGE_SECONDS - 1
+    assert [l["id"] for l in find_new_listings([listing], [], now=now)] == ["a"]
+
+
+def test_freshness_filter_does_not_reject_malformed_date_posted():
+    # Not this filter's job -- validate_listing rejects malformed dates later.
+    listing = _listing("a")
+    listing["date_posted"] = "not a number"
+    assert [l["id"] for l in find_new_listings([listing], [], now=1_000_000_000)] == ["a"]
 
 
 def test_bootstrap_returns_only_active_ids():
