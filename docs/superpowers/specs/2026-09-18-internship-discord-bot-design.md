@@ -4,7 +4,7 @@
 
 Automatically post new internship listings from the community-maintained
 [SimplifyJobs/Summer2027-Internships](https://github.com/SimplifyJobs/Summer2027-Internships)
-repo into a GSU CS club Discord channel, once per day, with no manual
+repo into a GSU CS club Discord channel, checked hourly, with no manual
 intervention.
 
 ## Constraints & Decisions
@@ -24,7 +24,7 @@ intervention.
 ## Architecture
 
 ```
-GitHub Actions cron (daily)
+GitHub Actions cron (hourly)
         │
         ▼
 check_internships.py
@@ -79,7 +79,7 @@ even if the script exited non-zero, so incremental progress persists
   giving a versioned audit trail of what's been posted and when.
 
 ### `.github/workflows/check.yml`
-- Scheduled trigger (daily cron, e.g. `0 13 * * *` — 9am ET).
+- Scheduled trigger (hourly cron, `0 * * * *`).
 - Also supports `workflow_dispatch` for manual runs (e.g. testing, or
   re-running after a failure).
 - A `concurrency` group (with `cancel-in-progress: false`) so an
