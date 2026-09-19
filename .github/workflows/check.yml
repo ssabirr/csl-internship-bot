@@ -1,0 +1,45 @@
+name: Check for new internships
+
+on:
+  schedule:
+    - cron: "0 13 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+# Overlapping runs (e.g. a manual dispatch during the scheduled run) must queue,
+# never race each other against the same posted.json.
+concurrency:
+  group: check-internships
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Run check
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python check_internships.py
+
+      # Runs even when the script exits non-zero: batches that did post are
+      # already recorded in posted.json, and that state must be committed or
+      # the next run would repost them.
+      - name: Commit updated posted.json
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add posted.json
+          git diff --staged --quiet || git commit -m "chore: update posted listings"
+          git push
