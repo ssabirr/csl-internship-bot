@@ -2,10 +2,15 @@
 
 ## Purpose
 
-Automatically post new internship listings from the community-maintained
+Automatically post new internship listings from community-maintained
+tracker repos —
 [SimplifyJobs/Summer2027-Internships](https://github.com/SimplifyJobs/Summer2027-Internships)
-repo into a GSU CS club Discord channel, checked hourly, with no manual
-intervention.
+and [vanshb03/Summer2027-Internships](https://github.com/vanshb03/Summer2027-Internships)
+— into a GSU CS club Discord channel, checked hourly, with no manual
+intervention. Other repos publishing the same JSON schema can be added
+later; repos whose data lives behind a private backend with no
+structured export (checked and rejected for speedyapply and zapplyjobs
+— see Out of Scope) are not supported.
 
 ## Constraints & Decisions
 
@@ -29,8 +34,9 @@ GitHub Actions cron (hourly)
         ▼
 check_internships.py
         │
-        ├─ GET raw listings.json from SimplifyJobs/Summer2027-Internships
-        ├─ read posted.json (already-posted listing IDs) from this repo
+        ├─ GET raw listings.json from each source repo (tolerating
+        │  individual source failures)
+        ├─ read posted.json (already-posted IDs + cross-source dedup keys)
         ├─ diff → new listings (oldest first), capped at 100/run
         ├─ validate + chunk into batches of ≤10 embeds
         ├─ POST each batch → webhook URL (secret)
@@ -44,21 +50,47 @@ even if the script exited non-zero, so incremental progress persists
 ## Components
 
 ### `check_internships.py`
-- Fetches `https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/.github/scripts/listings.json`.
-  The source file contains every listing ever recorded (17,000+
-  entries as of this writing), most with `active: false` (expired).
-  Only entries with `active: true` are considered.
-- Loads `posted.json` (a JSON array of listing IDs already posted).
+- Fetches each configured source's `listings.json` (currently
+  SimplifyJobs and vanshb03; both publish the same schema —
+  `.github/scripts/listings.json` with `id`, `active`, `is_visible`,
+  `date_posted`, `company_name`, `title`, `url`, `locations`). Sources
+  are fetched independently; one source failing to fetch is logged and
+  skipped rather than failing the whole run, unless *all* sources fail.
+  Each source file contains every listing ever recorded (thousands of
+  entries), most with `active: false` (expired). Only entries with
+  `active: true` are considered.
+- Loads `posted.json` — `{"ids": [...], "keys": [...]}`. `ids` are
+  per-listing IDs already posted (a listing keeps the same ID only
+  within its own source repo). `keys` are cross-source dedup
+  signatures (see below). A pre-existing `posted.json` from before
+  cross-source dedup was added — a plain JSON array of ID strings — is
+  auto-migrated to `{"ids": <that array>, "keys": []}` on load.
+- **Cross-source dedup:** two independent tracker repos assign
+  different IDs to the same real internship. Each listing also gets a
+  `dedup_key` — a normalized `company_name|title|url` signature
+  (lowercased, whitespace-trimmed). A listing already posted from one
+  source (its key is in `posted.json`'s `keys`) is skipped even if a
+  different source lists it under a new ID. Dedup is checked against
+  previously-*posted* keys, not within a single run's batch — two
+  sources introducing the exact same job in the same hour is a rare
+  edge case that would produce one duplicate, self-correcting on the
+  next run once the key is recorded.
 - **Bootstrap case:** if `posted.json` doesn't exist yet (first run),
-  write it with the IDs of every currently-active listing *without*
-  posting any of them to Discord, then exit. This avoids dumping
-  thousands of backlog listings into the channel at once. From the
-  next run onward, only genuinely new active listings get posted.
+  write it with the IDs and dedup keys of every currently-active
+  listing across all sources *without* posting any of them to Discord,
+  then exit. This avoids dumping thousands of backlog listings into
+  the channel at once. From the next run onward, only genuinely new
+  active listings get posted. (Adding a *new* source to an
+  already-running bot needs the same backlog-seeding treatment, done
+  once manually at deploy time — otherwise that source's entire
+  current backlog would look "new" in one run and trip the sanity
+  cap.)
 - Computes new listings: active, visible (`is_visible is not False`)
-  listings in the source whose `id` is not in `posted.json`. Sorted
-  oldest-first (`date_posted`) so the channel reads chronologically. If
-  more than 100 are found, exits non-zero without posting (sanity cap —
-  see Data Flow below).
+  listings, combined across all sources, whose `id` is not in
+  `posted.json`'s `ids` and whose `dedup_key` is not in its `keys`.
+  Sorted oldest-first (`date_posted`) so the channel reads
+  chronologically. If more than 100 are found, exits non-zero without
+  posting (sanity cap — see Data Flow below).
 - Validates each new listing and skips (logs + marks handled) any
   missing a required field; truncates an oversized title/description
   rather than rejecting it.
@@ -159,3 +191,22 @@ even if the script exited non-zero, so incremental progress persists
 - Filtering/tailoring listings (e.g. by role keyword) — posts
   everything in the source list. Can be added later as a follow-up if
   wanted.
+- **speedyapply/2027-SWE-College-Jobs, speedyapply/2027-AI-College-Jobs,
+  zapplyjobs/Internships-2027** — investigated and rejected as sources.
+  None publish a structured JSON export; their real data lives behind
+  a private backend (Supabase for speedyapply, Zapply's own platform),
+  and the repos only contain human-readable markdown tables generated
+  from it. Supporting these would mean scraping/parsing markdown
+  tables instead of reading structured JSON — meaningfully more
+  fragile (breaks silently on reformatting) and a separate adapter,
+  not a one-line addition. Revisit only if there's a strong reason to
+  take on that maintenance cost.
+- **Instagram Stories monitoring** — considered and rejected. Stories
+  require an authenticated session to view even on public accounts,
+  and no official API exposes a third party's Stories regardless of
+  account visibility or follower count. The only automation path is
+  unofficial scraping via a logged-in account against Instagram's
+  private API, which violates Instagram's Terms of Service and risks
+  that account being banned. Recommended alternative if revisited:
+  ask the content creator to forward posts directly (e.g. to a
+  webhook) rather than build a scraper.

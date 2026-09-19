@@ -2,10 +2,14 @@ from check_internships import (
     DESCRIPTION_MAX_LEN,
     TITLE_MAX_LEN,
     bootstrap_posted_ids,
+    bootstrap_posted_keys,
     chunked,
+    dedup_key,
     escape_markdown,
     find_new_listings,
     format_embed,
+    load_posted_ids,
+    save_posted_ids,
     truncate,
     validate_listing,
 )
@@ -121,6 +125,79 @@ def test_bootstrap_excludes_is_visible_false():
     c = _listing("c")
     c["is_visible"] = True
     assert set(bootstrap_posted_ids([a, b, c])) == {"a", "c"}
+
+
+# --- cross-source dedup ----------------------------------------------------
+
+
+def test_dedup_key_normalizes_case_and_whitespace():
+    a = _listing("a")
+    a["company_name"] = "  Acme Corp  "
+    a["title"] = "Software Intern"
+    a["url"] = "https://example.com/Job"
+    b = _listing("b")
+    b["company_name"] = "acme corp"
+    b["title"] = "SOFTWARE INTERN"
+    b["url"] = "HTTPS://EXAMPLE.COM/JOB"
+    assert dedup_key(a) == dedup_key(b)
+
+
+def test_dedup_key_differs_for_different_jobs():
+    a = _listing("a")
+    b = _listing("b")
+    b["company_name"] = "Different Co"
+    assert dedup_key(a) != dedup_key(b)
+
+
+def test_find_new_listings_excludes_by_posted_key_even_with_new_id():
+    listing = _listing("brand-new-id")
+    key = dedup_key(listing)
+    assert find_new_listings([listing], [], [key]) == []
+
+
+def test_find_new_listings_posted_keys_defaults_to_empty():
+    listing = _listing("a")
+    assert [l["id"] for l in find_new_listings([listing], [])] == ["a"]
+
+
+def test_bootstrap_posted_keys_returns_keys_for_active_visible_listings():
+    a = _listing("a")
+    b = _listing("b", active=False)
+    keys = bootstrap_posted_keys([a, b])
+    assert keys == [dedup_key(a)]
+
+
+def test_bootstrap_posted_keys_dedupes_identical_jobs_across_sources():
+    a = _listing("a")
+    b = _listing("b")  # same company/title/url as "a", different id
+    assert bootstrap_posted_keys([a, b]) == [dedup_key(a)]
+
+
+# --- state load/save (legacy migration) -------------------------------------
+
+
+def test_load_posted_ids_returns_none_when_missing(tmp_path):
+    assert load_posted_ids(str(tmp_path / "missing.json")) is None
+
+
+def test_load_posted_ids_migrates_legacy_flat_list(tmp_path):
+    path = tmp_path / "posted.json"
+    path.write_text('["a", "b", "c"]', encoding="utf-8")
+    state = load_posted_ids(str(path))
+    assert state == {"ids": ["a", "b", "c"], "keys": []}
+
+
+def test_load_posted_ids_reads_new_dict_format(tmp_path):
+    path = tmp_path / "posted.json"
+    path.write_text('{"ids": ["a"], "keys": ["k1"]}', encoding="utf-8")
+    state = load_posted_ids(str(path))
+    assert state == {"ids": ["a"], "keys": ["k1"]}
+
+
+def test_save_then_load_round_trips(tmp_path):
+    path = str(tmp_path / "posted.json")
+    save_posted_ids(path, {"ids": ["b", "a"], "keys": ["k2", "k1"]})
+    assert load_posted_ids(path) == {"ids": ["a", "b"], "keys": ["k1", "k2"]}
 
 
 # --- validation -----------------------------------------------------------

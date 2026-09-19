@@ -4,10 +4,18 @@ import os
 import sys
 import requests
 
-SOURCE_URL = (
-    "https://raw.githubusercontent.com/SimplifyJobs/"
-    "Summer2027-Internships/dev/.github/scripts/listings.json"
-)
+SOURCES = [
+    (
+        "SimplifyJobs",
+        "https://raw.githubusercontent.com/SimplifyJobs/"
+        "Summer2027-Internships/dev/.github/scripts/listings.json",
+    ),
+    (
+        "vanshb03",
+        "https://raw.githubusercontent.com/vanshb03/"
+        "Summer2027-Internships/main/.github/scripts/listings.json",
+    ),
+]
 POSTED_IDS_PATH = "posted.json"
 
 # Discord limits.
@@ -92,12 +100,28 @@ def _is_postable(listing):
     )
 
 
-def find_new_listings(source_listings, posted_ids):
-    posted = set(posted_ids)
+def dedup_key(listing):
+    """Normalized (company, title, url) signature for cross-source dedup.
+
+    Two independent tracker repos assign different `id`s to the same real
+    internship; this identifies "the same job" regardless of which repo it
+    came from.
+    """
+    company = str(listing.get("company_name", "")).strip().lower()
+    title = str(listing.get("title", "")).strip().lower()
+    url = str(listing.get("url", "")).strip().lower()
+    return f"{company}|{title}|{url}"
+
+
+def find_new_listings(source_listings, posted_ids, posted_keys=()):
+    posted_ids = set(posted_ids)
+    posted_keys = set(posted_keys)
     new = [
         listing
         for listing in source_listings
-        if _is_postable(listing) and listing.get("id") not in posted
+        if _is_postable(listing)
+        and listing.get("id") not in posted_ids
+        and dedup_key(listing) not in posted_keys
     ]
     new.sort(key=_sort_key)
     return new
@@ -105,6 +129,12 @@ def find_new_listings(source_listings, posted_ids):
 
 def bootstrap_posted_ids(source_listings):
     return [listing["id"] for listing in source_listings if _is_postable(listing)]
+
+
+def bootstrap_posted_keys(source_listings):
+    return list(
+        {dedup_key(listing) for listing in source_listings if _is_postable(listing)}
+    )
 
 
 def format_embed(listing):
@@ -131,22 +161,54 @@ def format_embed(listing):
     }
 
 
-def fetch_source_listings():
-    response = requests.get(SOURCE_URL, timeout=30)
+def fetch_source_listings(url):
+    response = requests.get(url, timeout=30)
     response.raise_for_status()
     return response.json()
 
 
+def fetch_all_sources(sources):
+    """Fetch every (name, url) source, tolerating individual failures.
+
+    Returns (combined_listings, failed_source_names). A source that fails
+    to fetch is skipped rather than failing the whole run -- one tracker
+    repo being briefly down shouldn't block posting from the others.
+    """
+    combined = []
+    failed = []
+    for name, url in sources:
+        try:
+            combined.extend(fetch_source_listings(url))
+        except (requests.RequestException, ValueError) as exc:
+            print(f"Failed to fetch source '{name}': {type(exc).__name__}", file=sys.stderr)
+            failed.append(name)
+    return combined, failed
+
+
 def load_posted_ids(path):
+    """Load tracked state, migrating the legacy flat-ID-list format.
+
+    Returns {"ids": [...], "keys": [...]}, or None if the file doesn't
+    exist (first run). A pre-existing posted.json from before cross-source
+    dedup was added is a plain JSON array of ID strings; that's treated as
+    {"ids": <that array>, "keys": []} so nothing is lost or reposted.
+    """
     if not os.path.exists(path):
         return None
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    if isinstance(data, list):
+        return {"ids": data, "keys": []}
+    return {"ids": data.get("ids", []), "keys": data.get("keys", [])}
 
 
-def save_posted_ids(path, ids):
+def save_posted_ids(path, state):
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(ids, f, indent=2)
+        json.dump(
+            {"ids": sorted(state["ids"]), "keys": sorted(state["keys"])},
+            f,
+            indent=2,
+        )
         f.write("\n")
 
 
@@ -174,21 +236,26 @@ def _status_code(exc):
 def main():
     webhook_url = os.environ["DISCORD_WEBHOOK_URL"]
 
-    try:
-        source_listings = fetch_source_listings()
-    except (requests.RequestException, ValueError) as exc:
-        print(f"Failed to fetch source listings: {type(exc).__name__}", file=sys.stderr)
+    source_listings, failed_sources = fetch_all_sources(SOURCES)
+    if len(failed_sources) == len(SOURCES):
+        print("Failed to fetch any source; nothing to do.", file=sys.stderr)
         sys.exit(1)
+    if failed_sources:
+        print(f"Warning: continuing without source(s): {failed_sources}", file=sys.stderr)
 
-    posted_ids = load_posted_ids(POSTED_IDS_PATH)
+    state = load_posted_ids(POSTED_IDS_PATH)
 
-    if posted_ids is None:
-        seeded = bootstrap_posted_ids(source_listings)
-        save_posted_ids(POSTED_IDS_PATH, seeded)
-        print(f"Bootstrap: seeded {len(seeded)} active listing IDs, posted nothing.")
+    if state is None:
+        seeded_ids = bootstrap_posted_ids(source_listings)
+        seeded_keys = bootstrap_posted_keys(source_listings)
+        save_posted_ids(POSTED_IDS_PATH, {"ids": seeded_ids, "keys": seeded_keys})
+        print(f"Bootstrap: seeded {len(seeded_ids)} active listing IDs, posted nothing.")
         return
 
-    new_listings = find_new_listings(source_listings, posted_ids)
+    posted_ids = list(state["ids"])
+    posted_keys = list(state["keys"])
+
+    new_listings = find_new_listings(source_listings, posted_ids, posted_keys)
 
     if not new_listings:
         print("No new listings.")
@@ -207,20 +274,25 @@ def main():
     # so it never wedges the pipeline behind it.
     postable = []
     skipped_ids = []
+    skipped_keys = []
     for listing in new_listings:
         reason = validate_listing(listing)
         if reason is None:
             postable.append(listing)
             continue
-        listing_id = listing.get("id") if isinstance(listing, dict) else None
-        print(f"Skipping listing {listing_id!r}: {reason}")
-        if listing_id is not None:
-            skipped_ids.append(listing_id)
+        if isinstance(listing, dict):
+            listing_id = listing.get("id")
+            print(f"Skipping listing {listing_id!r}: {reason}")
+            if listing_id is not None:
+                skipped_ids.append(listing_id)
+                skipped_keys.append(dedup_key(listing))
+        else:
+            print(f"Skipping listing: {reason}")
 
-    posted_ids = list(posted_ids)
     if skipped_ids:
         posted_ids.extend(skipped_ids)
-        save_posted_ids(POSTED_IDS_PATH, posted_ids)
+        posted_keys.extend(skipped_keys)
+        save_posted_ids(POSTED_IDS_PATH, {"ids": posted_ids, "keys": posted_keys})
 
     posted_count = 0
     dropped_count = 0
@@ -228,6 +300,7 @@ def main():
 
     for batch in chunked(postable, EMBEDS_PER_MESSAGE):
         batch_ids = [listing["id"] for listing in batch]
+        batch_keys = [dedup_key(listing) for listing in batch]
         try:
             post_to_discord(webhook_url, [format_embed(listing) for listing in batch])
         except requests.RequestException as exc:
@@ -241,7 +314,8 @@ def main():
                     file=sys.stderr,
                 )
                 posted_ids.extend(batch_ids)
-                save_posted_ids(POSTED_IDS_PATH, posted_ids)
+                posted_keys.extend(batch_keys)
+                save_posted_ids(POSTED_IDS_PATH, {"ids": posted_ids, "keys": posted_keys})
                 dropped_count += len(batch_ids)
                 had_client_error = True
                 continue
@@ -255,7 +329,8 @@ def main():
             sys.exit(1)
 
         posted_ids.extend(batch_ids)
-        save_posted_ids(POSTED_IDS_PATH, posted_ids)
+        posted_keys.extend(batch_keys)
+        save_posted_ids(POSTED_IDS_PATH, {"ids": posted_ids, "keys": posted_keys})
         posted_count += len(batch_ids)
 
     print(
