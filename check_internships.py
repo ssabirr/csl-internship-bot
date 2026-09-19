@@ -150,8 +150,12 @@ def save_posted_ids(path, ids):
         f.write("\n")
 
 
+WEBHOOK_USERNAME = "PantherWatch"
+
+
 def post_to_discord(webhook_url, embeds):
-    response = requests.post(webhook_url, json={"embeds": embeds}, timeout=30)
+    payload = {"username": WEBHOOK_USERNAME, "embeds": embeds}
+    response = requests.post(webhook_url, json=payload, timeout=30)
     response.raise_for_status()
 
 
