@@ -189,10 +189,27 @@ even if the script exited non-zero, so incremental progress persists
   run once the underlying issue is fixed. (Found via a real 403 during
   bot-token setup, when the batch would otherwise have been
   permanently dropped over what was just a missing channel permission.)
-- **Sanity cap:** if the number of new listings in a single run exceeds
-  a large threshold (100), the run exits non-zero without posting
-  anything. This is a guard against a corrupted or hand-edited
-  `posted.json` causing a mass-repost of the entire active listing set.
+- **Per-run processing limit (self-healing throttle):** at most
+  `PER_RUN_LISTING_LIMIT` (150) new listings are processed per run,
+  oldest first; any excess is simply left untouched for the next run —
+  nothing is marked handled, so it's picked up normally next time.
+  This paces a real high-volume burst across several runs without any
+  manual intervention. (Originally this was a hard abort at 100 with
+  no processing at all; a real high-volume week — 295 genuinely fresh
+  listings in one run — tripped it, and because a hard abort writes
+  zero state, the identical growing backlog re-tripped it on every
+  subsequent run for 4 days straight with no self-recovery, appearing
+  as "the bot keeps failing" when the actual cause was safe-guard
+  design, not rejected/invalid listings.)
+- **Corruption guard:** if the number of new listings in a single run
+  exceeds `CORRUPTION_GUARD_THRESHOLD` (1000), the run exits non-zero
+  without posting or writing anything, forcing investigation before
+  retrying. This is reserved for actual corruption (e.g. a wiped or
+  badly truncated `posted.json`) — the 5-day freshness filter already
+  bounds even a fully-empty `posted.json`'s worst case to a few
+  hundred (measured: 421 across both sources at time of writing), so
+  1000 sits comfortably above any volume that's ever legitimate while
+  staying well below what real corruption looks like.
 - **Concurrency guard:** the workflow uses a concurrency group so an
   overlapping manual (`workflow_dispatch`) run can never race the
   scheduled run against the same `posted.json`.

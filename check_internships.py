@@ -24,8 +24,22 @@ EMBEDS_PER_MESSAGE = 10
 TITLE_MAX_LEN = 256
 DESCRIPTION_MAX_LEN = 4096
 
-# Guard against a corrupted/hand-edited posted.json causing a mass repost.
-MAX_NEW_LISTINGS = 100
+# Process at most this many new listings per run, oldest first; any excess
+# is simply left for the next run (nothing is marked handled, so it's
+# re-evaluated normally next time). This paces a real high-volume burst
+# across several runs instead of processing it all in one shot, and -- since
+# nothing is written when there's an excess -- a run that's still over the
+# cap next time just processes the next batch, self-healing without any
+# manual intervention.
+PER_RUN_LISTING_LIMIT = 150
+
+# Hard stop reserved for actual corruption (e.g. posted.json wiped or badly
+# truncated), not a real high-volume day: exits without posting or writing
+# any state, forcing a human to look. The 5-day freshness filter already
+# bounds the worst case (fully empty posted.json) to a few hundred, so this
+# sits well above any volume that's ever legitimate, while still being far
+# below "thousands," which is what actual corruption looks like.
+CORRUPTION_GUARD_THRESHOLD = 1000
 
 # Only post listings whose date_posted is this recent -- otherwise a
 # listing sourced weeks/months ago (e.g. a source repo backfilling old
@@ -287,14 +301,22 @@ def main():
         print("No new listings.")
         return
 
-    if len(new_listings) > MAX_NEW_LISTINGS:
+    if len(new_listings) > CORRUPTION_GUARD_THRESHOLD:
         print(
-            f"Refusing to post: {len(new_listings)} new listings exceeds the sanity "
-            f"cap of {MAX_NEW_LISTINGS}. posted.json may be corrupted or truncated. "
-            "Nothing was posted and no state was written; investigate before rerunning.",
+            f"Refusing to post: {len(new_listings)} new listings exceeds the "
+            f"corruption guard of {CORRUPTION_GUARD_THRESHOLD}. posted.json may be "
+            "corrupted or truncated. Nothing was posted and no state was written; "
+            "investigate before rerunning.",
             file=sys.stderr,
         )
         sys.exit(1)
+
+    if len(new_listings) > PER_RUN_LISTING_LIMIT:
+        print(
+            f"Found {len(new_listings)} new listings; processing the oldest "
+            f"{PER_RUN_LISTING_LIMIT} this run and leaving the rest for future runs."
+        )
+        new_listings = new_listings[:PER_RUN_LISTING_LIMIT]
 
     # Validate first: a bad listing is skipped, logged, and still marked handled
     # so it never wedges the pipeline behind it.
