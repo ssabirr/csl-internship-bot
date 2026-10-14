@@ -16,8 +16,12 @@ the original GSU CS club server (via the PantherWatch bot) and the
 "Icna Technology Summer Internship" server (via an incoming webhook,
 nicknamed InternWatch in that server's context — see Multi-Destination
 Delivery below for why the mechanism differs between the two). Both
-currently share the same daily volume cap and prioritization rules;
-nothing stops them from diverging later.
+destinations run the exact same unthrottled behavior GSU always has —
+hourly checks, oldest-first, no daily cap, no prioritization. A
+daily-cap/prioritization/slower-cadence redesign was discussed and
+even drafted into this spec at one point, but was explicitly dropped
+before implementation (see Out of Scope) — nothing about GSU's posting
+behavior changes as part of adding ICNA.
 
 ## Constraints & Decisions
 
@@ -55,7 +59,7 @@ nothing stops them from diverging later.
 ## Architecture
 
 ```
-GitHub Actions cron (every 6 hours)
+GitHub Actions cron (hourly)
         │
         ▼
 check_internships.py
@@ -65,13 +69,9 @@ check_internships.py
         │
         └─ for each destination (gsu, icna, ...):
              ├─ load that destination's own state slice from posted.json
-             │  (ids, keys, daily_count, daily_date)
-             ├─ diff → new + fresh + undeduped listings
+             │  (ids, keys)
+             ├─ diff → new + fresh + undeduped listings (oldest first)
              ├─ corruption guard / per-run limit (per destination)
-             ├─ prioritize: notable-company tier first, freshest within tier
-             ├─ cap to that destination's remaining daily quota
-             ├─ re-sort the selected slice oldest-first for a clean,
-             │  chronological read in the actual posted messages
              ├─ validate + chunk into batches of ≤10 embeds
              ├─ POST each batch via that destination's delivery method
              │  (bot REST API + bot token, or webhook URL)
@@ -87,7 +87,9 @@ even if the script exited non-zero, so incremental progress persists
 
 Added 2026-10-14 when a second server (ICNA) needed the same feed. The
 design generalizes "post to Discord" into a list of **destinations**,
-each independently configured, tracked, and paced:
+each independently configured and tracked — otherwise behaving
+identically to the original single-destination design (same ordering,
+same guards, same cadence):
 
 ```python
 DESTINATIONS = [
@@ -103,8 +105,8 @@ DESTINATIONS = [
   secret (no bot token involved).
 - A single `post_embeds(destination, auth, embeds)` dispatches on
   `destination["type"]` to build the right request; everything
-  upstream of it (filtering, prioritizing, batching) is identical
-  regardless of destination type.
+  upstream of it (filtering, batching) is identical regardless of
+  destination type.
 - If a destination's required secret is missing or empty, that
   destination is skipped (logged, not fatal) for this run — a
   misconfiguration on one destination (e.g. the ICNA webhook secret
@@ -121,8 +123,8 @@ DESTINATIONS = [
 ```json
 {
   "destinations": {
-    "gsu":  {"ids": [...], "keys": [...], "daily_count": 0, "daily_date": "2026-10-14"},
-    "icna": {"ids": [...], "keys": [...], "daily_count": 0, "daily_date": "2026-10-14"}
+    "gsu":  {"ids": [...], "keys": [...]},
+    "icna": {"ids": [...], "keys": [...]}
   }
 }
 ```
@@ -140,53 +142,6 @@ destination proceeds with normal posting in that same run. Bootstrap
 status is no longer an all-or-nothing gate on the whole script — it's
 per destination, so adding a third destination later never disrupts
 the first two.
-
-### Daily volume cap + prioritization
-
-Separate from (and in addition to) the existing per-run/corruption
-guards, which still apply per destination:
-
-- `DAILY_POST_LIMIT = 15` — at most this many listings actually posted
-  per destination per UTC day. Tracked as `daily_count` +
-  `daily_date` in that destination's state slice; `daily_count` resets
-  to 0 the first time a run observes `daily_date` isn't today (UTC).
-  If today's quota is already used up, that destination posts nothing
-  this run — deferred to the next UTC day, not lost (candidates are
-  simply re-evaluated fresh next time, same self-healing pattern as
-  every other limit in this script).
-- **Why a cap at all:** real volume (60-300+ fresh listings/day in
-  season across both sources) vastly exceeds what's useful in a club
-  channel — flooding it hurts engagement rather than helping. ~15/day
-  was chosen as "enough to feel alive, not enough to feel like noise."
-- **Prioritization:** since the cap means most candidates on a busy day
-  won't make the cut, which ones do matters. Candidates are sorted by
-  `(is_notable_company, -date_posted)` — notable-company listings
-  always placed ahead of others, freshest-first as the tiebreaker
-  within each tier — before slicing to the remaining quota. This
-  reorders `find_new_listings`'s oldest-first output only for
-  *selection*; the finally-selected slice is re-sorted oldest-first
-  again before batching, so the actual posted messages still read
-  chronologically.
-- **Notable-companies list:** a maintained allowlist matched
-  case-insensitively as a substring of `company_name` (so "Google LLC"
-  still matches "google"). There is no "prestige" field in the source
-  data, so this is inherently a judgment call requiring upkeep, not a
-  property of the data itself. Starter list (pending the operator's
-  review/edits):
-
-  > Google, Meta, Apple, Amazon, Microsoft, Netflix, Nvidia, OpenAI,
-  > Anthropic, Tesla, SpaceX, Palantir, Stripe, Databricks, Airbnb,
-  > Uber, Salesforce, Adobe, IBM, Oracle, Bloomberg, Goldman Sachs,
-  > Morgan Stanley, JPMorgan, Jane Street, Citadel, Two Sigma,
-  > Susquehanna, D.E. Shaw, Optiver, Hudson River Trading, Point72
-
-### Cadence change
-
-Hourly checks were themselves part of the "too frequent" complaint
-independent of volume. The schedule moves from `0 * * * *` (hourly) to
-`0 */6 * * *` (every 6 hours, 4x/day). Combined with the daily cap,
-each send is typically just 3-4 embeds in a single Discord message —
-the opposite of the flood this was built to fix.
 
 ## Components
 
@@ -227,16 +182,11 @@ the opposite of the flood this was built to fix.
   (`MAX_LISTING_AGE_DAYS` — see Data Flow below). A missing/malformed
   `date_posted` is not filtered here; `validate_listing` rejects those
   separately, keeping "is it fresh" and "is it well-formed" as distinct
-  checks. `find_new_listings` itself still returns oldest-first — the
-  notable/freshest prioritization used to pick which ones win a limited
-  daily quota is a separate re-sort applied on top in `main()` (see
-  Multi-Destination Delivery), after which the picked slice is
-  re-sorted oldest-first again before batching for a chronological
-  read in the actual posted messages. If more than
-  `CORRUPTION_GUARD_THRESHOLD` are found for a destination, that
-  destination exits non-zero without posting (corruption guard — see
-  Data Flow below); if more than `PER_RUN_LISTING_LIMIT` (before the
-  daily-quota slicing) are found, only that many are considered this
+  checks. Sorted oldest-first (`date_posted`) so the channel reads
+  chronologically. If more than `CORRUPTION_GUARD_THRESHOLD` are found
+  for a destination, that destination exits non-zero without posting
+  (corruption guard — see Data Flow below); if more than
+  `PER_RUN_LISTING_LIMIT` are found, only that many are considered this
   run and the rest wait for the next one.
 - Validates each new listing and skips (logs + marks handled) any
   missing a required field; truncates an oversized title/description
@@ -247,9 +197,9 @@ the opposite of the flood this was built to fix.
   URL), containing embeds with: company name, role title, location,
   posted date, and the application link.
 - After each batch posts successfully, immediately writes that
-  destination's updated state (including that batch's IDs/keys and
-  incremented `daily_count`) back to `posted.json` — incremental
-  persistence, not a single write at the end.
+  destination's updated state (including that batch's IDs/keys) back
+  to `posted.json` — incremental persistence, not a single write at
+  the end.
 - Exits non-zero (after attempting every destination) if fetching *all*
   sources failed, or if any destination hit the corruption guard or an
   unresolved batch-post failure — in the batch-failure case, that
@@ -258,14 +208,13 @@ the opposite of the flood this was built to fix.
   destinations are unaffected.
 
 ### `posted.json`
-- `{"destinations": {"<name>": {"ids": [...], "keys": [...],
-  "daily_count": int, "daily_date": "YYYY-MM-DD"}, ...}}` — see
-  Multi-Destination Delivery for the full shape and migration from
-  earlier formats. Committed to the repo, giving a versioned audit
-  trail of what's been posted, when, and to which destination.
+- `{"destinations": {"<name>": {"ids": [...], "keys": [...]}, ...}}`
+  — see Multi-Destination Delivery for the full shape and migration
+  from earlier formats. Committed to the repo, giving a versioned
+  audit trail of what's been posted, when, and to which destination.
 
 ### `.github/workflows/check.yml`
-- Scheduled trigger (every-6-hours cron, `0 */6 * * *`).
+- Scheduled trigger (hourly cron, `0 * * * *`).
 - Also supports `workflow_dispatch` for manual runs (e.g. testing, or
   re-running after a failure).
 - A `concurrency` group (with `cancel-in-progress: false`) so an
@@ -309,12 +258,6 @@ the opposite of the flood this was built to fix.
   sent. This still guarantees a listing is never silently dropped (it's
   retried until it succeeds) while eliminating the duplicate-storm
   failure mode of the original all-or-nothing rule.
-- **What counts toward `daily_count`:** only listings actually posted
-  to Discord successfully. A listing dropped on HTTP 400, or skipped
-  during validation, is marked handled (added to that destination's
-  `ids`/`keys` so it's never retried) but does **not** increment
-  `daily_count` — it never appeared in the channel, so it shouldn't
-  consume that day's visible-post budget.
 - **Per-listing validation:** a listing missing a required field, or
   with an oversized title/description, is skipped and logged rather
   than aborting the whole run — one bad listing from the
@@ -352,11 +295,6 @@ the opposite of the flood this was built to fix.
   backlog re-tripped it on every subsequent run for 4 days straight
   with no self-recovery, appearing as "the bot keeps failing" when the
   actual cause was safe-guard design, not rejected/invalid listings.)
-  Since this limit's slice feeds directly into the daily-quota slicing
-  described under Multi-Destination Delivery, in practice the daily
-  cap (15) binds far tighter than this 150 ceiling — this limit mainly
-  guards the corruption-guard/validation/batching work itself against
-  an extreme per-destination burst, independent of the daily cap.
 - **Corruption guard:** if the number of new listings found for a
   single destination in one run exceeds `CORRUPTION_GUARD_THRESHOLD`
   (1000), that destination exits non-zero without posting or writing
@@ -408,7 +346,10 @@ Webhooks," which the operator does have there.
 
 1. In the target channel: **Edit Channel → Integrations → Webhooks →
    New Webhook**. Name/avatar it as desired (nickname "InternWatch" for
-   this server's context).
+   this server's context — this is the webhook's own configured name,
+   shown automatically on every message it posts; no code-level
+   override is needed, unlike the earlier bot-side `WEBHOOK_USERNAME`
+   mechanism from before GSU switched to a full bot account).
 2. Copy the webhook URL immediately into a GitHub Actions secret named
    `DISCORD_ICNA_WEBHOOK_URL` — **never paste a webhook URL anywhere
    other than directly into the GitHub secret field.** It's a bearer
@@ -430,10 +371,9 @@ no changes needed to any other destination's config or state.
 ## Testing
 
 - Unit-testable pure functions for the diff logic (`new listings from
-  source + posted`), state migration (legacy flat format → per-
-  destination format), notable-company matching, priority sort, and
-  daily-quota reset/remaining math — fixture cases following the
-  existing suite's pattern.
+  source + posted`) and state migration (legacy flat format →
+  per-destination format) — fixture cases following the existing
+  suite's pattern.
 - Manual end-to-end test via `workflow_dispatch` against a test Discord
   channel before pointing at a real club channel. For the ICNA
   destination specifically: verify its independent bootstrap doesn't
@@ -444,16 +384,23 @@ no changes needed to any other destination's config or state.
 
 - Any bot commands, moderation, or other club-bot features — this repo
   is scoped to internship posting only.
-- Filtering/tailoring listings by role keyword — posts everything that
-  passes the freshness/validity/dedup checks and the daily cap,
-  regardless of role. Company-based prioritization exists (see
-  Multi-Destination Delivery); keyword filtering can be added later as
-  a follow-up if wanted.
-- Per-destination divergence in cap/company-list values — both
-  destinations currently share `DAILY_POST_LIMIT` and
-  `NOTABLE_COMPANIES`. The state model supports per-destination values
-  diverging later; the constants themselves aren't parameterized per
-  destination yet because nothing has asked for it.
+- Filtering/tailoring listings by role keyword, company reputation, or
+  any other criterion — posts everything that passes the
+  freshness/validity/dedup checks, regardless of role or company.
+- **Daily volume cap + notable-company prioritization + slower
+  cadence** — a redesign to reduce posting volume/frequency and
+  prioritize "better" listings when over a cap was discussed in detail
+  and drafted into an earlier version of this spec, but was explicitly
+  dropped before implementation once it became clear it had never
+  actually been deployed to GSU either. Both destinations run the
+  original unthrottled, unprioritized behavior. Revisit as its own
+  separate change if wanted later — it should not be silently
+  reintroduced as a side effect of unrelated work.
+- Per-destination divergence in any future per-destination setting —
+  not applicable today since there are no destination-specific tuning
+  values at all (both destinations share identical behavior by
+  construction, not by configuration). Would become relevant again if
+  a cap/prioritization feature (see above) is revisited.
 - **speedyapply/2027-SWE-College-Jobs, speedyapply/2027-AI-College-Jobs,
   zapplyjobs/Internships-2027** — investigated and rejected as sources.
   None publish a structured JSON export; their real data lives behind
