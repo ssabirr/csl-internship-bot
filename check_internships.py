@@ -17,7 +17,7 @@ SOURCES = [
         "Summer2027-Internships/main/.github/scripts/listings.json",
     ),
 ]
-POSTED_IDS_PATH = "posted.json"
+STATE_PATH = "posted.json"
 
 # Discord limits.
 EMBEDS_PER_MESSAGE = 10
@@ -221,30 +221,40 @@ def fetch_all_sources(sources):
     return combined, failed
 
 
-def load_posted_ids(path):
-    """Load tracked state, migrating the legacy flat-ID-list format.
+def load_state(path):
+    """Load per-destination state, migrating older formats.
 
-    Returns {"ids": [...], "keys": [...]}, or None if the file doesn't
-    exist (first run). A pre-existing posted.json from before cross-source
-    dedup was added is a plain JSON array of ID strings; that's treated as
-    {"ids": <that array>, "keys": []} so nothing is lost or reposted.
+    Returns {"destinations": {name: {"ids": [...], "keys": [...]}, ...}},
+    or None if the file doesn't exist (first run ever). Pre-existing
+    posted.json files from before this format existed are migrated into
+    destinations.gsu: either a plain JSON array of ID strings (the oldest
+    format), or the flat {"ids": [...], "keys": [...]} format (used
+    before multi-destination support). Neither loses any tracked data.
     """
     if not os.path.exists(path):
         return None
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, list):
-        return {"ids": data, "keys": []}
-    return {"ids": data.get("ids", []), "keys": data.get("keys", [])}
+        return {"destinations": {"gsu": {"ids": data, "keys": []}}}
+    if "destinations" in data:
+        return data
+    return {
+        "destinations": {
+            "gsu": {"ids": data.get("ids", []), "keys": data.get("keys", [])}
+        }
+    }
 
 
-def save_posted_ids(path, state):
+def save_state(path, state):
+    serializable = {"destinations": {}}
+    for name, dest_state in state["destinations"].items():
+        serializable["destinations"][name] = {
+            "ids": sorted(dest_state["ids"]),
+            "keys": sorted(dest_state["keys"]),
+        }
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(
-            {"ids": sorted(state["ids"]), "keys": sorted(state["keys"])},
-            f,
-            indent=2,
-        )
+        json.dump(serializable, f, indent=2)
         f.write("\n")
 
 

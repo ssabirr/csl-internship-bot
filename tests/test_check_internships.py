@@ -11,8 +11,8 @@ from check_internships import (
     escape_markdown,
     find_new_listings,
     format_embed,
-    load_posted_ids,
-    save_posted_ids,
+    load_state,
+    save_state,
     truncate,
     validate_listing,
 )
@@ -211,28 +211,49 @@ def test_bootstrap_posted_keys_dedupes_identical_jobs_across_sources():
 # --- state load/save (legacy migration) -------------------------------------
 
 
-def test_load_posted_ids_returns_none_when_missing(tmp_path):
-    assert load_posted_ids(str(tmp_path / "missing.json")) is None
+def test_load_state_returns_none_when_missing(tmp_path):
+    assert load_state(str(tmp_path / "missing.json")) is None
 
 
-def test_load_posted_ids_migrates_legacy_flat_list(tmp_path):
+def test_load_state_migrates_legacy_flat_id_list(tmp_path):
     path = tmp_path / "posted.json"
     path.write_text('["a", "b", "c"]', encoding="utf-8")
-    state = load_posted_ids(str(path))
-    assert state == {"ids": ["a", "b", "c"], "keys": []}
+    state = load_state(str(path))
+    assert state == {"destinations": {"gsu": {"ids": ["a", "b", "c"], "keys": []}}}
 
 
-def test_load_posted_ids_reads_new_dict_format(tmp_path):
+def test_load_state_migrates_legacy_ids_keys_dict(tmp_path):
     path = tmp_path / "posted.json"
     path.write_text('{"ids": ["a"], "keys": ["k1"]}', encoding="utf-8")
-    state = load_posted_ids(str(path))
-    assert state == {"ids": ["a"], "keys": ["k1"]}
+    state = load_state(str(path))
+    assert state == {"destinations": {"gsu": {"ids": ["a"], "keys": ["k1"]}}}
 
 
-def test_save_then_load_round_trips(tmp_path):
+def test_load_state_reads_destinations_format_as_is(tmp_path):
+    path = tmp_path / "posted.json"
+    path.write_text(
+        '{"destinations": {"gsu": {"ids": ["a"], "keys": []}}}',
+        encoding="utf-8",
+    )
+    state = load_state(str(path))
+    assert state == {"destinations": {"gsu": {"ids": ["a"], "keys": []}}}
+
+
+def test_save_then_load_round_trips_multiple_destinations(tmp_path):
     path = str(tmp_path / "posted.json")
-    save_posted_ids(path, {"ids": ["b", "a"], "keys": ["k2", "k1"]})
-    assert load_posted_ids(path) == {"ids": ["a", "b"], "keys": ["k1", "k2"]}
+    state = {
+        "destinations": {
+            "gsu": {"ids": ["b", "a"], "keys": ["k2", "k1"]},
+            "icna": {"ids": [], "keys": []},
+        }
+    }
+    save_state(path, state)
+    assert load_state(path) == {
+        "destinations": {
+            "gsu": {"ids": ["a", "b"], "keys": ["k1", "k2"]},
+            "icna": {"ids": [], "keys": []},
+        }
+    }
 
 
 # --- validation -----------------------------------------------------------
