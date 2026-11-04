@@ -309,53 +309,61 @@ def _status_code(exc):
     return getattr(response, "status_code", None)
 
 
-def main():
-    bot_token = os.environ["DISCORD_BOT_TOKEN"]
+def process_destination(name, destination, source_listings, state, save_callback, now=None):
+    """Processes one destination's share of a run.
 
-    source_listings, failed_sources = fetch_all_sources(SOURCES)
-    if len(failed_sources) == len(SOURCES):
-        print("Failed to fetch any source; nothing to do.", file=sys.stderr)
-        sys.exit(1)
-    if failed_sources:
-        print(f"Warning: continuing without source(s): {failed_sources}", file=sys.stderr)
+    `state` is the full {"destinations": {...}} tree; this destination's
+    slice lives at state["destinations"][name], created fresh here if
+    absent (bootstrap case). Mutates `state` in place and calls
+    save_callback() after every change that should be persisted
+    immediately -- never waits until the very end. Returns True if this
+    destination finished without an unresolved error (even if it posted
+    nothing), False if it hit a stop condition (missing secret,
+    corruption guard, an unresolved batch failure) that should make the
+    overall run exit non-zero. A problem here must never raise out to
+    the caller -- the caller still needs to attempt every other
+    destination regardless of what happens here.
+    """
+    auth = _resolve_auth(destination)
+    if auth is None:
+        print(f"[{name}] Missing required secret; skipping this destination.", file=sys.stderr)
+        return False
 
-    state = load_posted_ids(POSTED_IDS_PATH)
-
-    if state is None:
+    if name not in state["destinations"]:
         seeded_ids = bootstrap_posted_ids(source_listings)
         seeded_keys = bootstrap_posted_keys(source_listings)
-        save_posted_ids(POSTED_IDS_PATH, {"ids": seeded_ids, "keys": seeded_keys})
-        print(f"Bootstrap: seeded {len(seeded_ids)} active listing IDs, posted nothing.")
-        return
+        state["destinations"][name] = {"ids": seeded_ids, "keys": seeded_keys}
+        save_callback()
+        print(f"[{name}] Bootstrap: seeded {len(seeded_ids)} active listing IDs, posted nothing.")
+        return True
 
-    posted_ids = list(state["ids"])
-    posted_keys = list(state["keys"])
-
-    new_listings = find_new_listings(source_listings, posted_ids, posted_keys)
+    dest_state = state["destinations"][name]
+    new_listings = find_new_listings(source_listings, dest_state["ids"], dest_state["keys"], now=now)
 
     if not new_listings:
-        print("No new listings.")
-        return
+        print(f"[{name}] No new listings.")
+        return True
 
     if len(new_listings) > CORRUPTION_GUARD_THRESHOLD:
         print(
-            f"Refusing to post: {len(new_listings)} new listings exceeds the "
+            f"[{name}] Refusing to post: {len(new_listings)} new listings exceeds the "
             f"corruption guard of {CORRUPTION_GUARD_THRESHOLD}. posted.json may be "
-            "corrupted or truncated. Nothing was posted and no state was written; "
-            "investigate before rerunning.",
+            "corrupted or truncated. Nothing was posted and no state was written for "
+            "this destination; investigate before rerunning.",
             file=sys.stderr,
         )
-        sys.exit(1)
+        return False
 
     if len(new_listings) > PER_RUN_LISTING_LIMIT:
         print(
-            f"Found {len(new_listings)} new listings; processing the oldest "
+            f"[{name}] Found {len(new_listings)} new listings; processing the oldest "
             f"{PER_RUN_LISTING_LIMIT} this run and leaving the rest for future runs."
         )
         new_listings = new_listings[:PER_RUN_LISTING_LIMIT]
 
-    # Validate first: a bad listing is skipped, logged, and still marked handled
-    # so it never wedges the pipeline behind it.
+    posted_ids = list(dest_state["ids"])
+    posted_keys = list(dest_state["keys"])
+
     postable = []
     skipped_ids = []
     skipped_keys = []
@@ -366,17 +374,19 @@ def main():
             continue
         if isinstance(listing, dict):
             listing_id = listing.get("id")
-            print(f"Skipping listing {listing_id!r}: {reason}")
+            print(f"[{name}] Skipping listing {listing_id!r}: {reason}")
             if listing_id is not None:
                 skipped_ids.append(listing_id)
                 skipped_keys.append(dedup_key(listing))
         else:
-            print(f"Skipping listing: {reason}")
+            print(f"[{name}] Skipping listing: {reason}")
 
     if skipped_ids:
         posted_ids.extend(skipped_ids)
         posted_keys.extend(skipped_keys)
-        save_posted_ids(POSTED_IDS_PATH, {"ids": posted_ids, "keys": posted_keys})
+        dest_state["ids"] = posted_ids
+        dest_state["keys"] = posted_keys
+        save_callback()
 
     posted_count = 0
     dropped_count = 0
@@ -386,49 +396,69 @@ def main():
         batch_ids = [listing["id"] for listing in batch]
         batch_keys = [dedup_key(listing) for listing in batch]
         try:
-            post_to_discord(bot_token, [format_embed(listing) for listing in batch])
+            post_embeds(destination, auth, [format_embed(listing) for listing in batch])
         except requests.RequestException as exc:
             status = _status_code(exc)
             if status == 400:
-                # Bad Request: this specific payload is malformed and Discord
-                # will reject it again on every retry (unlike 401/403/404,
-                # which mean something is wrong with the bot's auth/permissions/
-                # channel config, not with this listing -- those should stay
-                # retryable so the listing posts once that's fixed, rather than
-                # being permanently marked handled over an unrelated outage).
-                # 429 is handled by the retryable branch below.
                 print(
-                    f"Discord rejected a batch with HTTP {status}; dropping these "
-                    f"listings without retry: {batch_ids}",
+                    f"[{name}] Discord rejected a batch with HTTP {status}; dropping "
+                    f"these listings without retry: {batch_ids}",
                     file=sys.stderr,
                 )
                 posted_ids.extend(batch_ids)
                 posted_keys.extend(batch_keys)
-                save_posted_ids(POSTED_IDS_PATH, {"ids": posted_ids, "keys": posted_keys})
+                dest_state["ids"] = posted_ids
+                dest_state["keys"] = posted_keys
+                save_callback()
                 dropped_count += len(batch_ids)
                 had_client_error = True
                 continue
             status_text = status if status is not None else "no response"
             print(
-                f"Failed to post batch to Discord (HTTP {status_text}); listing IDs "
-                f"in failed batch: {batch_ids}. Stopping; these will be retried on "
-                f"the next run. {posted_count} listing(s) posted and saved so far.",
+                f"[{name}] Failed to post batch to Discord (HTTP {status_text}); "
+                f"listing IDs in failed batch: {batch_ids}. Stopping; these will be "
+                f"retried on the next run. {posted_count} listing(s) posted and saved "
+                "so far.",
                 file=sys.stderr,
             )
-            sys.exit(1)
+            return False
 
         posted_ids.extend(batch_ids)
         posted_keys.extend(batch_keys)
-        save_posted_ids(POSTED_IDS_PATH, {"ids": posted_ids, "keys": posted_keys})
+        dest_state["ids"] = posted_ids
+        dest_state["keys"] = posted_keys
+        save_callback()
         posted_count += len(batch_ids)
 
     print(
-        f"Posted {posted_count} new listing(s); "
+        f"[{name}] Posted {posted_count} new listing(s); "
         f"skipped {len(skipped_ids)} invalid; dropped {dropped_count} rejected."
     )
 
-    if had_client_error:
+    return not had_client_error
+
+
+def main():
+    source_listings, failed_sources = fetch_all_sources(SOURCES)
+    if len(failed_sources) == len(SOURCES):
+        print("Failed to fetch any source; nothing to do.", file=sys.stderr)
         sys.exit(1)
+    if failed_sources:
+        print(f"Warning: continuing without source(s): {failed_sources}", file=sys.stderr)
+
+    state = load_state(STATE_PATH)
+    if state is None:
+        state = {"destinations": {}}
+
+    def save_callback():
+        save_state(STATE_PATH, state)
+
+    all_ok = True
+    for destination in DESTINATIONS:
+        ok = process_destination(destination["name"], destination, source_listings, state, save_callback)
+        all_ok = all_ok and ok
+
+    sys.exit(0 if all_ok else 1)
 
 
 if __name__ == "__main__":
