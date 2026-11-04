@@ -11,41 +11,46 @@ same JSON schema can be added later; repos whose data lives behind a
 private backend with no structured export (checked and rejected for
 speedyapply and zapplyjobs — see Out of Scope) are not supported.
 
-As of 2026-10-14 this posts to **two independent Discord servers**:
-the original GSU CS club server (via the PantherWatch bot) and the
-"Icna Technology Summer Internship" server (via an incoming webhook,
-nicknamed InternWatch in that server's context — see Multi-Destination
-Delivery below for why the mechanism differs between the two). Both
-destinations run the exact same unthrottled behavior GSU always has —
-hourly checks, oldest-first, no daily cap, no prioritization. A
-daily-cap/prioritization/slower-cadence redesign was discussed and
-even drafted into this spec at one point, but was explicitly dropped
-before implementation (see Out of Scope) — nothing about GSU's posting
-behavior changes as part of adding ICNA.
+As of 2026-11-04 this posts to **two independent Discord servers**,
+both via the same underlying **PantherWatch** Discord bot account,
+invited separately into each server and nicknamed differently per
+server (PantherWatch in GSU, InternWatch in ICNA — see Multi-Destination
+Delivery below): the original GSU CS club server, and the "Icna
+Technology Summer Internship" server. Both destinations run the exact
+same unthrottled behavior GSU always has — hourly checks, oldest-first,
+no daily cap, no prioritization. A daily-cap/prioritization/slower-
+cadence redesign was discussed and even drafted into this spec at one
+point, but was explicitly dropped before implementation (see Out of
+Scope) — nothing about GSU's posting behavior changes as part of
+adding ICNA.
+
+(An earlier version of this spec had ICNA delivered via an incoming
+webhook instead of a bot invite, because the operator initially lacked
+"Manage Server" permission on that server. That permission was
+obtained before implementation began, so the bot-invite route — the
+same mechanism GSU already uses — was used instead, and the webhook
+path was never built. The multi-destination abstraction below still
+supports a webhook-type destination generically, in case a future
+server lacks "Manage Server" and that fallback is needed again.)
 
 ## Constraints & Decisions
 
 - No native Discord integration exists on the source repos — we own the
   polling and delivery.
-- Delivery mechanism is chosen per destination, not fixed to one:
-  - **GSU** uses a real Discord **bot account authenticated via REST
-    API with a bot token** (originally an incoming webhook; switched so
-    the poster — PantherWatch — appears as a visible member of the
-    server, matching how other utility bots like Dyno appear). This
-    still needs no persistent Gateway connection: the bot only ever
-    sends messages via one-off REST calls, never reads or responds to
-    anything, so a short-lived scheduled script can authenticate as it
-    without staying connected.
-  - **ICNA** uses an **incoming webhook** instead, because inviting a
-    bot into a server requires the "Manage Server" permission, which
-    the operator of this bot does not have on the ICNA server, and
-    "Manage Server" is a hard Discord platform restriction with no
-    workaround — there is no code or configuration path around it. A
-    webhook only needs "Manage Webhooks," which the operator does have
-    there. This is an intentional mechanism split, not a design
-    inconsistency: a bot invite is used wherever it's available
-    (visible member, consistent identity), falling back to a webhook
-    only where server permissions genuinely block the bot route.
+- Both destinations use a real Discord **bot account authenticated via
+  REST API with a bot token** — the same PantherWatch application,
+  invited into each server independently (originally an incoming
+  webhook for GSU too; switched so the poster appears as a visible
+  member of the server, matching how other utility bots like Dyno
+  appear). This still needs no persistent Gateway connection: the bot
+  only ever sends messages via one-off REST calls, never reads or
+  responds to anything, so a short-lived scheduled script can
+  authenticate as it without staying connected. A bot invite requires
+  the inviter to hold "Manage Server" permission on the target server —
+  a hard Discord platform restriction with no code-level workaround.
+  The multi-destination design (below) also supports a webhook-type
+  destination generically, for a future server where "Manage Server"
+  genuinely isn't available.
 - Runs on **GitHub Actions** (scheduled workflow) — free, no server to
   maintain.
 - State (which listings have already been posted) is tracked by
@@ -94,14 +99,23 @@ same guards, same cadence):
 ```python
 DESTINATIONS = [
     {"name": "gsu", "type": "bot", "channel_id": "1291082188812582974"},
-    {"name": "icna", "type": "webhook", "secret_env": "DISCORD_ICNA_WEBHOOK_URL"},
+    {"name": "icna", "type": "bot", "channel_id": "1557562463753343086"},
 ]
 ```
+
+Both current destinations are `type: "bot"`, posting as the same
+PantherWatch application invited into two different servers and
+authenticated with the one shared `DISCORD_BOT_TOKEN` — no second bot
+application, no second secret. The `type: "webhook"` path described
+below exists in the code as a generic fallback (for a future server
+where the operator lacks "Manage Server"), not because anything
+currently uses it.
 
 - `type: "bot"` posts via `POST /channels/{channel_id}/messages` with
   `Authorization: Bot $DISCORD_BOT_TOKEN` (unchanged from the original
   single-destination design).
-- `type: "webhook"` posts directly to the URL stored in the named
+- `type: "webhook"` (not currently used by any configured destination)
+  posts directly to the URL stored in a destination-specific named
   secret (no bot token involved).
 - A single `post_embeds(destination, auth, embeds)` dispatches on
   `destination["type"]` to build the right request; everything
@@ -193,9 +207,9 @@ the first two.
   rather than rejecting it.
 - Batches valid listings into groups of up to 10 and POSTs each batch
   as one Discord message, via that destination's delivery method (see
-  Multi-Destination Delivery: bot REST API + bot token, or a webhook
-  URL), containing embeds with: company name, role title, location,
-  posted date, and the application link.
+  Multi-Destination Delivery: currently bot REST API + bot token for
+  both configured destinations), containing embeds with: company name,
+  role title, location, posted date, and the application link.
 - After each batch posts successfully, immediately writes that
   destination's updated state (including that batch's IDs/keys) back
   to `posted.json` — incremental persistence, not a single write at
@@ -222,9 +236,9 @@ the first two.
   racing it against the same `posted.json`.
 - A `timeout-minutes` cap on the job.
 - Steps: checkout, set up Python, install `requests`, run the script
-  with `DISCORD_BOT_TOKEN` and `DISCORD_ICNA_WEBHOOK_URL` from repo
-  secrets, then commit `posted.json` if it changed — this commit step
-  runs even if the script exited non-zero, so incrementally-saved
+  with `DISCORD_BOT_TOKEN` from repo secrets (shared by both current
+  destinations), then commit `posted.json` if it changed — this commit
+  step runs even if the script exited non-zero, so incrementally-saved
   progress from a partial batch failure survives instead of being lost
   with the runner.
 
@@ -331,42 +345,44 @@ the first two.
    Channel**, **Send Messages**, **Embed Links** — no broader
    permissions than the bot actually needs. Open it and authorize it
    into the server. Requires "Manage Server" permission on the target
-   server — see ICNA destination below for the fallback when that's
-   not available.
+   server.
 4. Set that destination's `channel_id` in `DESTINATIONS` to the target
    channel's ID (Discord → enable Developer Mode → right-click channel
    → Copy Channel ID). Not a secret.
 
-### ICNA destination (webhook)
+### ICNA destination (bot, same application as GSU)
 
-Used instead of a bot invite because the operator lacks "Manage
-Server" permission on this server — a hard Discord platform
-restriction with no workaround; a webhook only needs "Manage
-Webhooks," which the operator does have there.
+No new Discord Application, no new secret — this reuses the existing
+PantherWatch application and `DISCORD_BOT_TOKEN`, invited into a second
+server.
 
-1. In the target channel: **Edit Channel → Integrations → Webhooks →
-   New Webhook**. Name/avatar it as desired (nickname "InternWatch" for
-   this server's context — this is the webhook's own configured name,
-   shown automatically on every message it posts; no code-level
-   override is needed, unlike the earlier bot-side `WEBHOOK_USERNAME`
-   mechanism from before GSU switched to a full bot account).
-2. Copy the webhook URL immediately into a GitHub Actions secret named
-   `DISCORD_ICNA_WEBHOOK_URL` — **never paste a webhook URL anywhere
-   other than directly into the GitHub secret field.** It's a bearer
-   credential with no separate auth step; anyone who has the URL can
-   post as it. (One was accidentally pasted in plaintext chat during
-   this feature's setup — that one was deleted and regenerated before
-   use, never stored in code or committed anywhere.)
-3. No invite flow, no permissions dialog, no channel ID needed — the
-   webhook URL alone fully identifies both the destination and the
-   credential.
+1. Generate the same OAuth2 invite URL again (Developer Portal →
+   PantherWatch application → OAuth2 → URL Generator, same scope/
+   permissions as the GSU setup above). Requires "Manage Server"
+   permission on the ICNA server specifically (obtained before this
+   was implemented — see the note under Purpose for the earlier
+   webhook-based plan this replaced).
+2. Open the invite URL, select the ICNA server, authorize.
+3. Set a server-specific nickname for the bot in the ICNA server (e.g.
+   via the member list → Edit Server Profile) to **InternWatch** —
+   Discord supports a different nickname per server for the same
+   underlying bot account, so this needs no code change at all.
+4. Add a second entry to `DESTINATIONS` with that server's target
+   channel's ID (`channel_id`, not a secret) and `type: "bot"` — no
+   `secret_env` needed since bot-type destinations all share
+   `DISCORD_BOT_TOKEN`.
 
 ### Adding a future destination
 
-Add an entry to `DESTINATIONS` (bot type needs "Manage Server" on that
-server; webhook type needs only "Manage Webhooks"), add whatever
-secret it requires, and it bootstraps independently on its first run —
-no changes needed to any other destination's config or state.
+Add an entry to `DESTINATIONS`. If "Manage Server" is available on
+that server, reuse the bot-invite flow above (just a new `channel_id`,
+no new secret). If it genuinely isn't, use `type: "webhook"` instead
+(needs only "Manage Webhooks") with its own `secret_env` pointing at a
+new GitHub secret for that webhook's URL — **never paste a webhook URL
+anywhere other than directly into the GitHub secret field**; it's a
+bearer credential with no separate auth step. Either way, a new
+destination bootstraps independently on its first run — no changes
+needed to any other destination's config or state.
 
 ## Testing
 
