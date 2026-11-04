@@ -1,5 +1,7 @@
 import time
 
+import pytest
+
 from check_internships import (
     DESCRIPTION_MAX_LEN,
     MAX_LISTING_AGE_SECONDS,
@@ -11,6 +13,7 @@ from check_internships import (
     escape_markdown,
     find_new_listings,
     format_embed,
+    _resolve_auth,
     load_state,
     save_state,
     truncate,
@@ -405,3 +408,47 @@ def test_chunked_empty():
 def test_chunked_preserves_order_and_contents():
     items = list(range(25))
     assert [x for batch in chunked(items, 10) for x in batch] == items
+
+
+# --- multi-destination posting dispatch -------------------------------------
+
+
+def test_resolve_auth_bot_type_reads_bot_token(monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "fake-token")
+    destination = {"name": "gsu", "type": "bot", "channel_id": "123"}
+    assert _resolve_auth(destination) == "fake-token"
+
+
+def test_resolve_auth_webhook_type_reads_its_own_secret_env(monkeypatch):
+    # Fixture name/secret are illustrative only -- no currently-configured
+    # destination is type: "webhook"; this covers the dispatcher's generic
+    # fallback path for a possible future server lacking "Manage Server".
+    monkeypatch.setenv("DISCORD_SOME_OTHER_SERVER_WEBHOOK_URL", "https://discord.com/api/webhooks/fake")
+    destination = {
+        "name": "some_other_server",
+        "type": "webhook",
+        "secret_env": "DISCORD_SOME_OTHER_SERVER_WEBHOOK_URL",
+    }
+    assert _resolve_auth(destination) == "https://discord.com/api/webhooks/fake"
+
+
+def test_resolve_auth_missing_env_var_returns_none(monkeypatch):
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+    destination = {"name": "gsu", "type": "bot", "channel_id": "123"}
+    assert _resolve_auth(destination) is None
+
+
+def test_resolve_auth_empty_string_env_var_returns_none(monkeypatch):
+    monkeypatch.setenv("DISCORD_SOME_OTHER_SERVER_WEBHOOK_URL", "")
+    destination = {
+        "name": "some_other_server",
+        "type": "webhook",
+        "secret_env": "DISCORD_SOME_OTHER_SERVER_WEBHOOK_URL",
+    }
+    assert _resolve_auth(destination) is None
+
+
+def test_resolve_auth_unknown_type_raises():
+    destination = {"name": "bad", "type": "carrier_pigeon"}
+    with pytest.raises(ValueError):
+        _resolve_auth(destination)

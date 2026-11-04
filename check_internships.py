@@ -258,15 +258,41 @@ def save_state(path, state):
         f.write("\n")
 
 
-# The channel PantherWatch posts to. Not a secret -- useless without the
-# bot token, which is what actually authorizes posting.
-DISCORD_CHANNEL_ID = "1291082188812582974"
+DESTINATIONS = [
+    {"name": "gsu", "type": "bot", "channel_id": "1291082188812582974"},
+    {"name": "icna", "type": "bot", "channel_id": "1557562463753343086"},
+]
 
 
-def post_to_discord(bot_token, embeds):
-    url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages"
-    headers = {"Authorization": f"Bot {bot_token}"}
-    response = requests.post(url, headers=headers, json={"embeds": embeds}, timeout=30)
+def _resolve_auth(destination):
+    """Returns the auth value (bot token or webhook URL) for a destination,
+    or None if its required secret/env var is missing or empty -- callers
+    must treat None as "skip this destination," never as a 'try anyway'.
+    """
+    if destination["type"] == "bot":
+        return os.environ.get("DISCORD_BOT_TOKEN") or None
+    if destination["type"] == "webhook":
+        return os.environ.get(destination["secret_env"]) or None
+    raise ValueError(f"Unknown destination type: {destination['type']!r}")
+
+
+def post_embeds(destination, auth, embeds):
+    """Posts a batch of embeds to one destination.
+
+    `auth` is the bot token (type: "bot") or the webhook URL itself
+    (type: "webhook") -- whatever _resolve_auth returned for this
+    destination. Raises requests.RequestException on failure, same
+    contract the single-destination post_to_discord had.
+    """
+    if destination["type"] == "bot":
+        url = f"https://discord.com/api/v10/channels/{destination['channel_id']}/messages"
+        response = requests.post(
+            url, headers={"Authorization": f"Bot {auth}"}, json={"embeds": embeds}, timeout=30
+        )
+    elif destination["type"] == "webhook":
+        response = requests.post(auth, json={"embeds": embeds}, timeout=30)
+    else:
+        raise ValueError(f"Unknown destination type: {destination['type']!r}")
     response.raise_for_status()
 
 
