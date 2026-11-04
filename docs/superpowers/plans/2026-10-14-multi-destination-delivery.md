@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Generalize posting from one hardcoded Discord bot-channel into a list of independently-tracked destinations (the existing GSU bot channel plus a new ICNA webhook), with **no behavior change** to GSU's existing posting pattern (hourly, oldest-first, no cap).
+**Goal:** Generalize posting from one hardcoded Discord bot-channel into a list of independently-tracked destinations (the existing GSU bot channel plus a new ICNA channel, both using the same PantherWatch bot/token invited into two servers), with **no behavior change** to GSU's existing posting pattern (hourly, oldest-first, no cap).
 
-**Architecture:** `check_internships.py` fetches all sources once per run (unchanged), then loops over `DESTINATIONS`, running a self-contained `process_destination()` pipeline per destination against its own slice of a per-destination state tree in `posted.json`. A destination is either `type: "bot"` (REST API + bot token) or `type: "webhook"` (POST to a webhook URL secret); `post_embeds()` dispatches between them. A brand-new destination bootstraps itself (seeds its backlog without posting) automatically the first time it's seen, independent of any other destination's state.
+**Architecture:** `check_internships.py` fetches all sources once per run (unchanged), then loops over `DESTINATIONS`, running a self-contained `process_destination()` pipeline per destination against its own slice of a per-destination state tree in `posted.json`. A destination is either `type: "bot"` (REST API + bot token) or `type: "webhook"` (POST to a webhook URL secret) — both configured destinations currently use `type: "bot"`, sharing one `DISCORD_BOT_TOKEN`; the webhook path exists in the dispatcher as a generic fallback for a future server lacking "Manage Server," not because anything currently uses it. `post_embeds()` dispatches between the two. A brand-new destination bootstraps itself (seeds its backlog without posting) automatically the first time it's seen, independent of any other destination's state.
 
 **Tech Stack:** Python 3, `requests`, GitHub Actions (unchanged).
 
@@ -17,8 +17,9 @@
 - `CORRUPTION_GUARD_THRESHOLD = 1000` (unchanged) — hard abort per destination if exceeded.
 - `MAX_LISTING_AGE_DAYS = 5` (unchanged) — freshness filter.
 - Cadence stays `0 * * * *` (hourly) — unchanged.
-- `DESTINATIONS = [{"name": "gsu", "type": "bot", "channel_id": "1291082188812582974"}, {"name": "icna", "type": "webhook", "secret_env": "DISCORD_ICNA_WEBHOOK_URL"}]` — exact values.
-- Secrets: `DISCORD_BOT_TOKEN` (existing, for `type: "bot"` destinations) and `DISCORD_ICNA_WEBHOOK_URL` (new, for the `icna` destination specifically — each webhook-type destination's secret name comes from its own `secret_env` field).
+- `DESTINATIONS = [{"name": "gsu", "type": "bot", "channel_id": "1291082188812582974"}, {"name": "icna", "type": "bot", "channel_id": "1557562463753343086"}]` — exact values. Both are `type: "bot"`; no new secret is needed since both share the existing `DISCORD_BOT_TOKEN` (same PantherWatch application, invited into both servers, nicknamed InternWatch in ICNA — a Discord-side setting, not a code change).
+- Secrets: `DISCORD_BOT_TOKEN` (existing, used by every `type: "bot"` destination). No new secret is added by this plan — a future `type: "webhook"` destination would need its own, via a `secret_env` field, but none is configured today.
+- No change to `.github/workflows/check.yml` is needed by this plan — it already passes `DISCORD_BOT_TOKEN` through, which is all either destination requires.
 - State file path and name are unchanged (`posted.json`), but its top-level shape changes to `{"destinations": {...}}` — see Task 1.
 - Reuse, do not redefine: `SOURCES`, `fetch_all_sources`, `fetch_source_listings`, `find_new_listings`, `bootstrap_posted_ids`, `bootstrap_posted_keys`, `dedup_key`, `_is_postable`, `_is_recent`, `_sort_key`, `validate_listing`, `chunked`, `format_embed`, `escape_markdown`, `truncate`, `_status_code`. None of these need to change.
 - Only `requests` as a third-party dependency (unchanged).
@@ -166,7 +167,7 @@ git commit -m "feat: per-destination state format with legacy migration"
 - Consumes: nothing from Task 1.
 - Produces: `DESTINATIONS` (list of dicts, see Global Constraints for exact value), `_resolve_auth(destination) -> str | None`, `post_embeds(destination, auth, embeds) -> None` (raises `requests.RequestException` on failure, same contract the old `post_to_discord` had). `_resolve_auth` returns `None` if the destination's required env var is unset *or empty* — never raises, never returns an empty string.
 
-This task's `post_embeds` makes real network calls and is integration code, same as the old `post_to_discord` was (never unit-tested with a live request) — but `_resolve_auth` is pure and fully testable without touching the network, so it gets real tests. `post_embeds` itself is verified later by the manual dry run in Task 3.
+This task's `post_embeds` makes real network calls and is integration code, same as the old `post_to_discord` was (never unit-tested with a live request) — but `_resolve_auth` is pure and fully testable without touching the network, so it gets real tests. `post_embeds` itself is verified later by the manual dry run in Task 3. The webhook-type test cases below exercise the dispatcher's generic fallback path even though no currently-configured destination uses it (both `DESTINATIONS` entries are `type: "bot"`) — this keeps that code path from silently rotting if it's ever needed for a future server lacking "Manage Server".
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -180,8 +181,15 @@ def test_resolve_auth_bot_type_reads_bot_token(monkeypatch):
 
 
 def test_resolve_auth_webhook_type_reads_its_own_secret_env(monkeypatch):
-    monkeypatch.setenv("DISCORD_ICNA_WEBHOOK_URL", "https://discord.com/api/webhooks/fake")
-    destination = {"name": "icna", "type": "webhook", "secret_env": "DISCORD_ICNA_WEBHOOK_URL"}
+    # Fixture name/secret are illustrative only -- no currently-configured
+    # destination is type: "webhook"; this covers the dispatcher's generic
+    # fallback path for a possible future server lacking "Manage Server".
+    monkeypatch.setenv("DISCORD_SOME_OTHER_SERVER_WEBHOOK_URL", "https://discord.com/api/webhooks/fake")
+    destination = {
+        "name": "some_other_server",
+        "type": "webhook",
+        "secret_env": "DISCORD_SOME_OTHER_SERVER_WEBHOOK_URL",
+    }
     assert _resolve_auth(destination) == "https://discord.com/api/webhooks/fake"
 
 
@@ -192,8 +200,12 @@ def test_resolve_auth_missing_env_var_returns_none(monkeypatch):
 
 
 def test_resolve_auth_empty_string_env_var_returns_none(monkeypatch):
-    monkeypatch.setenv("DISCORD_ICNA_WEBHOOK_URL", "")
-    destination = {"name": "icna", "type": "webhook", "secret_env": "DISCORD_ICNA_WEBHOOK_URL"}
+    monkeypatch.setenv("DISCORD_SOME_OTHER_SERVER_WEBHOOK_URL", "")
+    destination = {
+        "name": "some_other_server",
+        "type": "webhook",
+        "secret_env": "DISCORD_SOME_OTHER_SERVER_WEBHOOK_URL",
+    }
     assert _resolve_auth(destination) is None
 
 
@@ -215,7 +227,7 @@ In `check_internships.py`, replace the existing `DISCORD_CHANNEL_ID` constant an
 ```python
 DESTINATIONS = [
     {"name": "gsu", "type": "bot", "channel_id": "1291082188812582974"},
-    {"name": "icna", "type": "webhook", "secret_env": "DISCORD_ICNA_WEBHOOK_URL"},
+    {"name": "icna", "type": "bot", "channel_id": "1557562463753343086"},
 ]
 
 
@@ -260,7 +272,7 @@ Expected: PASS (all 5 new tests)
 
 ```bash
 git add check_internships.py tests/test_check_internships.py
-git commit -m "feat: multi-destination posting dispatch (bot + webhook)"
+git commit -m "feat: multi-destination posting dispatch (bot + webhook, both DESTINATIONS use bot)"
 ```
 
 ---
@@ -481,55 +493,16 @@ git commit -m "feat: restructure main() into per-destination processing"
 
 ---
 
-### Task 4: Wire up the ICNA webhook secret in the workflow
-
-**Files:**
-- Modify: `.github/workflows/check.yml`
-
-**Interfaces:** None — this task only changes the workflow YAML, no Python interfaces involved. The cron schedule is **not** touched by this task (stays `0 * * * *`, per Global Constraints).
-
-**Important operational note for whoever runs this task:** pushing a change to any file under `.github/workflows/` through this repo's `gh`/git CLI setup has previously been rejected with `refusing to allow an OAuth App to create or update workflow ... without 'workflow' scope`. If that happens again: commit the change locally, but the push itself may need to go through GitHub's web file editor instead (`github.com/ssabirr/csl-internship-bot/edit/master/.github/workflows/check.yml`) rather than `git push`. This is a known, already-encountered limitation of this project's push credentials, not a bug in this task's instructions.
-
-- [ ] **Step 1: Add the new secret to the `Run check` step's env**
-
-In `.github/workflows/check.yml`, change:
-```yaml
-      - name: Run check
-        env:
-          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-        run: python check_internships.py
-```
-to:
-```yaml
-      - name: Run check
-        env:
-          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-          DISCORD_ICNA_WEBHOOK_URL: ${{ secrets.DISCORD_ICNA_WEBHOOK_URL }}
-        run: python check_internships.py
-```
-
-- [ ] **Step 2: Confirm the `DISCORD_ICNA_WEBHOOK_URL` secret already exists on the repo**
-
-Run: `gh api repos/ssabirr/csl-internship-bot/actions/secrets --jq '.secrets[].name'`
-Expected: output includes `DISCORD_ICNA_WEBHOOK_URL` (it should already have been added per the spec's Setup section, before this task runs — if it's missing, stop and get it added first; the workflow will otherwise run with that destination silently skipped every time, per Task 2/3's "missing secret" handling).
-
-- [ ] **Step 3: Commit and push**
-
-```bash
-git add .github/workflows/check.yml
-git commit -m "ci: wire up ICNA webhook secret"
-git push
-```
-
-If the push is rejected for the OAuth workflow-scope reason described above, apply this same one-line diff manually via the GitHub web editor instead, and skip the local push for this one file.
-
----
-
 ## Post-plan verification
 
-After all tasks land and are live (not just the repo's local test suite), trigger the workflow manually (`gh workflow run check.yml --repo ssabirr/csl-internship-bot`) and confirm from its logs:
+No workflow/secret changes are needed before this can run live — `DESTINATIONS` lists two `type: "bot"` entries and both share the already-present `DISCORD_BOT_TOKEN` secret, which `.github/workflows/check.yml` already passes through unchanged. Confirm that assumption once before the first real run:
+
+Run: `gh api repos/ssabirr/csl-internship-bot/actions/secrets --jq '.secrets[].name'`
+Expected: output includes `DISCORD_BOT_TOKEN`. (If a future destination ever needs `type: "webhook"`, *that* would require adding its own secret and a corresponding `env:` line in the workflow — not needed here.)
+
+After all three tasks land and are pushed, trigger the workflow manually (`gh workflow run check.yml --repo ssabirr/csl-internship-bot`) and confirm from its logs:
 
 1. `[icna]` bootstraps (seeds its backlog, posts nothing) on its first real run — confirms the per-destination bootstrap doesn't flood the new server.
 2. `[gsu]` continues processing normally in the *same* run (not blocked by `icna`'s bootstrap, and vice versa) — confirms destination independence.
 3. `[gsu]`'s behavior (cadence, ordering, volume) is unchanged from before this plan — no daily cap, no prioritization, still hourly, still oldest-first.
-4. Check Discord directly: the ICNA server's `#sabir-bot` channel shows the webhook's configured name (set when the webhook was created, per the spec's Setup section) — no code-level username override is needed for the webhook destination, unlike the bot destination's earlier `WEBHOOK_USERNAME` mechanism (which no longer exists, since GSU posts as a real bot account now).
+4. Check Discord directly: the ICNA server shows the bot posting under its server-specific nickname "InternWatch" (set manually in that server's member list, per the spec's Setup section — a Discord-side setting, not something the code controls) in the `#sabir-bot` channel.
