@@ -15,6 +15,7 @@ from check_internships import (
     format_embed,
     _resolve_auth,
     load_state,
+    process_destination,
     save_state,
     truncate,
     validate_listing,
@@ -452,3 +453,73 @@ def test_resolve_auth_unknown_type_raises():
     destination = {"name": "bad", "type": "carrier_pigeon"}
     with pytest.raises(ValueError):
         _resolve_auth(destination)
+
+
+# --- destination independence under unexpected errors -----------------------
+
+
+def test_main_continues_other_destinations_if_one_raises_unexpectedly(monkeypatch, tmp_path):
+    import check_internships as ci
+
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "fake-token")
+    monkeypatch.setattr(ci, "SOURCES", [("fake", "http://fake")])
+    monkeypatch.setattr(ci, "fetch_all_sources", lambda sources: ([], []))
+    monkeypatch.setattr(
+        ci,
+        "DESTINATIONS",
+        [
+            {"name": "bad", "type": "bot", "channel_id": "1"},
+            {"name": "good", "type": "bot", "channel_id": "2"},
+        ],
+    )
+    monkeypatch.setattr(ci, "STATE_PATH", str(tmp_path / "posted.json"))
+
+    calls = []
+
+    def fake_process_destination(name, destination, source_listings, state, save_callback, now=None, sources_complete=True):
+        calls.append(name)
+        if name == "bad":
+            raise RuntimeError("boom")
+        return True
+
+    monkeypatch.setattr(ci, "process_destination", fake_process_destination)
+
+    with pytest.raises(SystemExit) as exc_info:
+        ci.main()
+
+    assert calls == ["bad", "good"]
+    assert exc_info.value.code == 1
+
+
+# --- deferred bootstrap when a source failed to fetch ------------------------
+
+
+def test_process_destination_defers_bootstrap_when_sources_incomplete(monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "fake-token")
+    destination = {"name": "icna", "type": "bot", "channel_id": "123"}
+    state = {"destinations": {}}
+    calls = []
+
+    ok = process_destination(
+        "icna", destination, [], state, lambda: calls.append(1), sources_complete=False
+    )
+
+    assert ok is True
+    assert "icna" not in state["destinations"]
+    assert calls == []
+
+
+def test_process_destination_bootstraps_when_sources_complete(monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "fake-token")
+    destination = {"name": "icna", "type": "bot", "channel_id": "123"}
+    listing = _listing("a")
+    state = {"destinations": {}}
+    calls = []
+
+    ok = process_destination(
+        "icna", destination, [listing], state, lambda: calls.append(1), sources_complete=True
+    )
+
+    assert ok is True
+    assert state["destinations"]["icna"]["ids"] == ["a"]
+    assert len(calls) == 1

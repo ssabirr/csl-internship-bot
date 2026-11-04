@@ -309,7 +309,7 @@ def _status_code(exc):
     return getattr(response, "status_code", None)
 
 
-def process_destination(name, destination, source_listings, state, save_callback, now=None):
+def process_destination(name, destination, source_listings, state, save_callback, now=None, sources_complete=True):
     """Processes one destination's share of a run.
 
     `state` is the full {"destinations": {...}} tree; this destination's
@@ -320,9 +320,17 @@ def process_destination(name, destination, source_listings, state, save_callback
     destination finished without an unresolved error (even if it posted
     nothing), False if it hit a stop condition (missing secret,
     corruption guard, an unresolved batch failure) that should make the
-    overall run exit non-zero. A problem here must never raise out to
-    the caller -- the caller still needs to attempt every other
-    destination regardless of what happens here.
+    overall run exit non-zero. Callers should also treat any exception
+    raised here as equivalent to a False return for this destination
+    only -- see main()'s try/except around this call.
+
+    `sources_complete` is False when one or more configured sources
+    failed to fetch this run. Bootstrap is deferred (not attempted) in
+    that case: seeding a destination's backlog from a partial listing
+    set would under-seed it, and everything from the missing source
+    would then look "new" and flood that destination once it finally
+    loads -- bootstrap retries automatically on a future run once all
+    sources succeed.
     """
     auth = _resolve_auth(destination)
     if auth is None:
@@ -330,6 +338,9 @@ def process_destination(name, destination, source_listings, state, save_callback
         return False
 
     if name not in state["destinations"]:
+        if not sources_complete:
+            print(f"[{name}] Deferring bootstrap: not all sources fetched successfully this run.")
+            return True
         seeded_ids = bootstrap_posted_ids(source_listings)
         seeded_keys = bootstrap_posted_keys(source_listings)
         state["destinations"][name] = {"ids": seeded_ids, "keys": seeded_keys}
@@ -453,9 +464,21 @@ def main():
     def save_callback():
         save_state(STATE_PATH, state)
 
+    sources_complete = not failed_sources
+
     all_ok = True
     for destination in DESTINATIONS:
-        ok = process_destination(destination["name"], destination, source_listings, state, save_callback)
+        name = destination["name"]
+        try:
+            ok = process_destination(
+                name, destination, source_listings, state, save_callback, sources_complete=sources_complete
+            )
+        except Exception as exc:
+            # Never let one destination's unexpected failure stop the others
+            # from being attempted. Log only the exception type, not str(exc)
+            # -- it could echo request details, same policy as _status_code.
+            print(f"[{name}] Unexpected error: {type(exc).__name__}", file=sys.stderr)
+            ok = False
         all_ok = all_ok and ok
 
     sys.exit(0 if all_ok else 1)
